@@ -6,7 +6,7 @@
 
 use crate::acpi::tables::ACPICPUInfo;
 use crate::cpu::ghcb::current_ghcb;
-use crate::cpu::percpu::{this_cpu, this_cpu_mut, this_cpu_shared, PerCpu};
+use crate::cpu::percpu::{this_cpu_mut, this_cpu_shared, PerCpu};
 use crate::cpu::vmsa::init_svsm_vmsa;
 use crate::platform::SvsmPlatform;
 use crate::platform::SVSM_PLATFORM;
@@ -68,7 +68,7 @@ fn start_ap() {
         .expect("setup_on_cpu() failed");
 
     // Configure the #HV doorbell page as required.
-    this_cpu()
+    this_cpu_mut()
         .configure_hv_doorbell()
         .expect("configure_hv_doorbell() failed");
 

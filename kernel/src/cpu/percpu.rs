@@ -239,7 +239,7 @@ pub struct PerCpuUnsafe {
 }
 
 impl PerCpuUnsafe {
-    pub fn new(apic_id: u32, cpu_unsafe_ptr: *const PerCpuUnsafe) -> Self {
+    pub fn new(apic_id: u32, cpu_unsafe_ptr: *mut PerCpuUnsafe) -> Self {
         Self {
             private: RefCell::new(PerCpu::new(apic_id, cpu_unsafe_ptr)),
             shared: PerCpuShared::new(),
@@ -319,7 +319,7 @@ impl PerCpuUnsafe {
 
 #[derive(Debug)]
 pub struct PerCpu {
-    cpu_unsafe: *const PerCpuUnsafe,
+    cpu_unsafe: *mut PerCpuUnsafe,
     apic_id: u32,
     pgtbl: SpinLock<PageTableRef>,
     tss: X86Tss,
@@ -342,7 +342,7 @@ pub struct PerCpu {
 }
 
 impl PerCpu {
-    fn new(apic_id: u32, cpu_unsafe: *const PerCpuUnsafe) -> Self {
+    fn new(apic_id: u32, cpu_unsafe: *mut PerCpuUnsafe) -> Self {
         PerCpu {
             cpu_unsafe,
             apic_id,
@@ -370,8 +370,7 @@ impl PerCpu {
     }
 
     fn shared(&self) -> &'static PerCpuShared {
-        let cpu_unsafe = unsafe { &*self.cpu_unsafe };
-        cpu_unsafe.shared()
+        unsafe { (*self.cpu_unsafe).shared() }
     }
 
     pub const fn get_apic_id(&self) -> u32 {
@@ -404,8 +403,7 @@ impl PerCpu {
     fn allocate_init_stack(&mut self) -> Result<(), SvsmError> {
         let init_stack = Some(self.allocate_stack(SVSM_STACKS_INIT_TASK)?);
         unsafe {
-            let cpu_unsafe_mut_ptr = self.cpu_unsafe as *mut PerCpuUnsafe;
-            (*cpu_unsafe_mut_ptr).init_stack = init_stack;
+            (*self.cpu_unsafe).init_stack = init_stack;
         }
         Ok(())
     }
@@ -413,8 +411,7 @@ impl PerCpu {
     fn allocate_ist_stacks(&mut self) -> Result<(), SvsmError> {
         let double_fault_stack = Some(self.allocate_stack(SVSM_STACK_IST_DF_BASE)?);
         unsafe {
-            let cpu_unsafe_mut_ptr = self.cpu_unsafe as *mut PerCpuUnsafe;
-            (*cpu_unsafe_mut_ptr).ist.double_fault_stack = double_fault_stack;
+            (*self.cpu_unsafe).ist.double_fault_stack = double_fault_stack;
         }
         Ok(())
     }
@@ -424,11 +421,7 @@ impl PerCpu {
     }
 
     pub fn setup_ghcb(&mut self) -> Result<(), SvsmError> {
-        unsafe {
-            let cpu_unsafe_mut_ptr = self.cpu_unsafe as *mut PerCpuUnsafe;
-            let cpu_unsafe_mut = &mut *cpu_unsafe_mut_ptr;
-            cpu_unsafe_mut.setup_ghcb()
-        }
+        unsafe { (*self.cpu_unsafe).setup_ghcb() }
     }
 
     pub fn register_ghcb(&self) -> Result<(), SvsmError> {
@@ -438,7 +431,7 @@ impl PerCpu {
         }
     }
 
-    pub fn setup_hv_doorbell(&self) -> Result<(), SvsmError> {
+    pub fn setup_hv_doorbell(&mut self) -> Result<(), SvsmError> {
         let paddr = allocate_zeroed_page()?;
         let ghcb = &mut current_ghcb();
         if let Err(e) = HVDoorbell::init(paddr, ghcb) {
@@ -447,14 +440,13 @@ impl PerCpu {
         }
 
         unsafe {
-            let cpu_unsafe = self.cpu_unsafe as *mut PerCpuUnsafe;
-            (*cpu_unsafe).hv_doorbell = paddr.as_mut_ptr::<HVDoorbell>();
+            (*self.cpu_unsafe).hv_doorbell = paddr.as_mut_ptr::<HVDoorbell>();
         }
 
         Ok(())
     }
 
-    pub fn configure_hv_doorbell(&self) -> Result<(), SvsmError> {
+    pub fn configure_hv_doorbell(&mut self) -> Result<(), SvsmError> {
         // #HV doorbell configuration is only required if this system will make
         // use of restricted injection.
         if hypervisor_ghcb_features().contains(GHCBHvFeatures::SEV_SNP_RESTR_INJ) {
@@ -706,8 +698,7 @@ impl PerCpu {
     pub fn schedule_init(&mut self) -> TaskPointer {
         let task = self.runqueue.lock_write().schedule_init();
         unsafe {
-            let cpu_unsafe_mut_ptr = self.cpu_unsafe as *mut PerCpuUnsafe;
-            (*cpu_unsafe_mut_ptr).current_stack = task.stack_bounds();
+            (*self.cpu_unsafe).current_stack = task.stack_bounds();
         }
         task
     }
@@ -716,8 +707,7 @@ impl PerCpu {
         let ret = self.runqueue.lock_write().schedule_prepare();
         if let Some((_, ref next)) = ret {
             unsafe {
-                let cpu_unsafe_mut_ptr = self.cpu_unsafe as *mut PerCpuUnsafe;
-                (*cpu_unsafe_mut_ptr).current_stack = next.stack_bounds();
+                (*self.cpu_unsafe).current_stack = next.stack_bounds();
             }
         };
         ret
