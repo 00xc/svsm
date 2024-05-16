@@ -12,7 +12,6 @@ use crate::address::{Address, PhysAddr, VirtAddr};
 use crate::cpu::ghcb::current_ghcb;
 use crate::cpu::tss::TSS_LIMIT;
 use crate::cpu::vmsa::init_guest_vmsa;
-use crate::cpu::vmsa::vmsa_mut_ref_from_vaddr;
 use crate::error::SvsmError;
 use crate::locking::{LockGuard, RWLock, SpinLock};
 use crate::mm::alloc::{allocate_zeroed_page, free_page};
@@ -28,7 +27,7 @@ use crate::platform::SvsmPlatform;
 use crate::sev::ghcb::GHCB;
 use crate::sev::hv_doorbell::HVDoorbell;
 use crate::sev::msr_protocol::{hypervisor_ghcb_features, GHCBHvFeatures};
-use crate::sev::vmsa::allocate_new_vmsa;
+use crate::sev::vmsa::VmsaPage;
 use crate::sev::RMPFlags;
 use crate::task::{schedule, schedule_task, RunQueue, Task, TaskPointer, WaitQueue};
 use crate::types::{PAGE_SHIFT, PAGE_SHIFT_2M, PAGE_SIZE, PAGE_SIZE_2M, SVSM_TR_FLAGS, SVSM_TSS};
@@ -93,25 +92,6 @@ impl PerCpuAreas {
         ptr.iter()
             .find(|info| info.apic_id == apic_id)
             .map(|info| info.cpu_shared)
-    }
-}
-
-#[derive(Copy, Clone, Debug, Default)]
-pub struct VmsaRef {
-    pub vaddr: VirtAddr,
-}
-
-impl VmsaRef {
-    const fn new(vaddr: VirtAddr) -> Self {
-        Self { vaddr }
-    }
-
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    pub fn vmsa(&mut self) -> &mut VMSA {
-        let ptr = self.vaddr.as_mut_ptr::<VMSA>();
-        // SAFETY: this function takes &mut self, so only one mutable
-        // reference to the underlying VMSA can exist.
-        unsafe { ptr.as_mut().unwrap() }
     }
 }
 
@@ -343,7 +323,7 @@ pub struct PerCpu {
     apic_id: u32,
     pgtbl: SpinLock<PageTableRef>,
     tss: X86Tss,
-    svsm_vmsa: Option<VmsaRef>,
+    svsm_vmsa: Option<VmsaPage>,
     reset_ip: u64,
 
     /// PerCpu Virtual Memory Range
@@ -601,31 +581,27 @@ impl PerCpu {
         self.reset_ip = reset_ip;
     }
 
-    pub fn alloc_svsm_vmsa(&mut self) -> Result<(), SvsmError> {
+    pub fn alloc_svsm_vmsa(&mut self) -> Result<&mut VmsaPage, SvsmError> {
         if self.svsm_vmsa.is_some() {
             // FIXME: add a more explicit error variant for this condition
             return Err(SvsmError::Mem);
         }
 
-        let vaddr = allocate_new_vmsa(RMPFlags::GUEST_VMPL)?;
-        self.svsm_vmsa = Some(VmsaRef::new(vaddr));
-
-        Ok(())
+        let vmsa = VmsaPage::new(RMPFlags::GUEST_VMPL)?;
+        Ok(self.svsm_vmsa.insert(vmsa))
     }
 
-    pub fn get_svsm_vmsa(&mut self) -> &mut Option<VmsaRef> {
-        &mut self.svsm_vmsa
-    }
-
-    pub fn prepare_svsm_vmsa(&mut self, start_rip: u64) {
-        let mut vmsa = self.svsm_vmsa.unwrap();
-        let vmsa_ref = vmsa.vmsa();
-
-        vmsa_ref.tr = self.vmsa_tr_segment();
-        vmsa_ref.rip = start_rip;
+    pub fn prepare_svsm_vmsa(&mut self, start_rip: u64) -> Option<&mut VmsaPage> {
         let top_of_stack = unsafe { (*self.cpu_unsafe).get_top_of_stack() };
-        vmsa_ref.rsp = top_of_stack.into();
-        vmsa_ref.cr3 = self.get_pgtable().cr3_value().into();
+        let tr = self.vmsa_tr_segment();
+        let cr3 = self.get_pgtable().cr3_value();
+
+        let vmsa = self.svsm_vmsa.as_mut()?;
+        vmsa.tr = tr;
+        vmsa.rip = start_rip;
+        vmsa.rsp = top_of_stack.into();
+        vmsa.cr3 = cr3.into();
+        Some(vmsa)
     }
 
     pub fn unmap_guest_vmsa(&self) {
@@ -648,11 +624,13 @@ impl PerCpu {
     }
 
     pub fn alloc_guest_vmsa(&self) -> Result<(), SvsmError> {
-        let vaddr = allocate_new_vmsa(RMPFlags::GUEST_VMPL)?;
-        let paddr = virt_to_phys(vaddr);
+        let mut vmsa = VmsaPage::new(RMPFlags::GUEST_VMPL)?;
+        let paddr = vmsa.paddr();
+        init_guest_vmsa(&mut vmsa, self.reset_ip);
 
-        let vmsa = vmsa_mut_ref_from_vaddr(vaddr);
-        init_guest_vmsa(vmsa, self.reset_ip);
+        // Ensure the new VMSA does not get freed when we leave this
+        // function.
+        let _ = VmsaPage::leak(vmsa);
 
         self.shared().update_guest_vmsa(paddr);
 
