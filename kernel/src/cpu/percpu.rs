@@ -25,7 +25,7 @@ use crate::mm::{
 };
 use crate::platform::SvsmPlatform;
 use crate::sev::ghcb::GHCB;
-use crate::sev::hv_doorbell::HVDoorbell;
+use crate::sev::hv_doorbell::{HVDoorbell, HVDoorbellPage};
 use crate::sev::msr_protocol::{hypervisor_ghcb_features, GHCBHvFeatures};
 use crate::sev::vmsa::VmsaPage;
 use crate::sev::RMPFlags;
@@ -229,7 +229,7 @@ pub struct PerCpuUnsafe {
     shared: PerCpuShared,
     private: RefCell<PerCpu>,
     ghcb: *mut GHCB,
-    hv_doorbell: *mut HVDoorbell,
+    hv_doorbell: Option<HVDoorbellPage>,
     init_stack: Option<VirtAddr>,
     ist: IstStacks,
 
@@ -244,7 +244,7 @@ impl PerCpuUnsafe {
             private: RefCell::new(PerCpu::new(apic_id, cpu_unsafe_ptr)),
             shared: PerCpuShared::new(),
             ghcb: ptr::null_mut(),
-            hv_doorbell: ptr::null_mut(),
+            hv_doorbell: None,
             init_stack: None,
             ist: IstStacks::new(),
             current_stack: MemoryRegion::new(VirtAddr::null(), 0),
@@ -296,12 +296,15 @@ impl PerCpuUnsafe {
         self.ghcb
     }
 
-    pub fn hv_doorbell_unsafe(&self) -> *mut HVDoorbell {
-        self.hv_doorbell
+    pub fn hv_doorbell(&self) -> Option<&HVDoorbell> {
+        self.hv_doorbell.as_deref()
     }
 
-    pub fn hv_doorbell_addr(&self) -> usize {
-        ptr::addr_of!(self.hv_doorbell) as usize
+    pub fn hv_doorbell_percpu_addr(&self) -> VirtAddr {
+        self.hv_doorbell
+            .as_ref()
+            .map(|hv| ptr::from_ref(hv).into())
+            .unwrap_or(VirtAddr::null())
     }
 
     pub fn get_top_of_stack(&self) -> VirtAddr {
@@ -432,17 +435,11 @@ impl PerCpu {
     }
 
     pub fn setup_hv_doorbell(&mut self) -> Result<(), SvsmError> {
-        let paddr = allocate_zeroed_page()?;
         let ghcb = &mut current_ghcb();
-        if let Err(e) = HVDoorbell::init(paddr, ghcb) {
-            free_page(paddr);
-            return Err(e);
-        }
-
+        let page = HVDoorbellPage::new(ghcb)?;
         unsafe {
-            (*self.cpu_unsafe).hv_doorbell = paddr.as_mut_ptr::<HVDoorbell>();
+            (*self.cpu_unsafe).hv_doorbell = Some(page);
         }
-
         Ok(())
     }
 
@@ -450,10 +447,9 @@ impl PerCpu {
         // #HV doorbell configuration is only required if this system will make
         // use of restricted injection.
         if hypervisor_ghcb_features().contains(GHCBHvFeatures::SEV_SNP_RESTR_INJ) {
-            self.setup_hv_doorbell()
-        } else {
-            Ok(())
+            self.setup_hv_doorbell()?;
         }
+        Ok(())
     }
 
     fn setup_tss(&mut self) {

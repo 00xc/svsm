@@ -587,24 +587,30 @@ impl GHCB {
 }
 
 extern "C" {
-    pub fn switch_to_vmpl_unsafe(hv_doorbell: *mut HVDoorbell, vmpl: u32) -> bool;
+    pub fn switch_to_vmpl_unsafe(hv_doorbell: *const HVDoorbell, vmpl: u32) -> bool;
 }
 
 pub fn switch_to_vmpl(vmpl: u32) {
     // The switch to a lower VMPL must be done with an assembly sequence in
     // order to ensure that any #HV that occurs during the sequence will
     // correctly block the VMPL switch so that events can be processed.
-    unsafe {
+    let hv_doorbell = unsafe {
         let cpu_unsafe = this_cpu_unsafe();
-        let hv_doorbell = (*cpu_unsafe).hv_doorbell_unsafe();
+        (*cpu_unsafe).hv_doorbell()
+    };
 
-        // Process any pending #HV events before leaving the SVSM.  No event
-        // can cancel the request to enter the guest VMPL, so proceed with
-        // guest entry once events have been handled.
-        if !hv_doorbell.is_null() {
-            (*hv_doorbell).process_pending_events();
-        }
-        if !switch_to_vmpl_unsafe(hv_doorbell, vmpl) {
+    // Process any pending #HV events before leaving the SVSM.  No event
+    // can cancel the request to enter the guest VMPL, so proceed with
+    // guest entry once events have been handled.
+    let hv_ptr = if let Some(hv) = hv_doorbell {
+        hv.process_pending_events();
+        ptr::from_ref(hv)
+    } else {
+        ptr::null()
+    };
+
+    unsafe {
+        if !switch_to_vmpl_unsafe(hv_ptr, vmpl) {
             panic!("Failed to switch to VMPL {}", vmpl);
         }
     }
