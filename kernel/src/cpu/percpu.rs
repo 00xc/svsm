@@ -99,17 +99,11 @@ impl PerCpuAreas {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VmsaRef {
     pub vaddr: VirtAddr,
-    pub paddr: PhysAddr,
-    pub guest_owned: bool,
 }
 
 impl VmsaRef {
-    const fn new(v: VirtAddr, p: PhysAddr, g: bool) -> Self {
-        VmsaRef {
-            vaddr: v,
-            paddr: p,
-            guest_owned: g,
-        }
+    const fn new(vaddr: VirtAddr) -> Self {
+        Self { vaddr }
     }
 
     #[allow(clippy::needless_pass_by_ref_mut)]
@@ -614,9 +608,7 @@ impl PerCpu {
         }
 
         let vaddr = allocate_new_vmsa(RMPFlags::GUEST_VMPL)?;
-        let paddr = virt_to_phys(vaddr);
-
-        self.svsm_vmsa = Some(VmsaRef::new(vaddr, paddr, false));
+        self.svsm_vmsa = Some(VmsaRef::new(vaddr));
 
         Ok(())
     }

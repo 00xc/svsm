@@ -8,6 +8,7 @@ use crate::acpi::tables::ACPICPUInfo;
 use crate::cpu::ghcb::current_ghcb;
 use crate::cpu::percpu::{this_cpu, this_cpu_mut, this_cpu_shared, PerCpu};
 use crate::cpu::vmsa::init_svsm_vmsa;
+use crate::mm::virt_to_phys;
 use crate::platform::SvsmPlatform;
 use crate::platform::SVSM_PLATFORM;
 use crate::requests::{request_loop, request_processing_main};
@@ -30,7 +31,7 @@ fn start_cpu(platform: &dyn SvsmPlatform, apic_id: u32, vtom: u64) {
     percpu.prepare_svsm_vmsa(start_rip);
 
     let sev_features = vmsa.vmsa().sev_features;
-    let vmsa_pa = vmsa.paddr;
+    let vmsa_pa = virt_to_phys(vmsa.vaddr);
 
     let percpu_shared = unsafe { (*percpu.cpu_unsafe()).shared() };
 
