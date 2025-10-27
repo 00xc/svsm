@@ -18,7 +18,7 @@ use crate::error::SvsmError;
 use crate::hyperv;
 use crate::hyperv::{hyperv_start_cpu, IS_HYPERV};
 use crate::io::IOPort;
-use crate::mm::PerCPUMapping;
+use crate::mm::access::{BorrowMapping, LocalMapping, WriteableMapping};
 use crate::tdx::apic::TDX_APIC_ACCESSOR;
 use crate::tdx::tdcall::{
     td_accept_physical_memory, td_accept_virtual_memory, tdcall_vm_read, tdvmcall_halt,
@@ -249,16 +249,16 @@ impl SvsmPlatform for TdpPlatform {
 
         // The mailbox page was already accepted by the BSP in stage2 and
         // therefore it's been initialized as a zero page.
-        let context_pa = SIPI_STUB_GPA as usize + PAGE_SIZE - mem::size_of::<ApStartContext>();
+        let stub_gpa = PhysAddr::new(SIPI_STUB_GPA as usize);
         // SAFETY: the physical address is known to point to the location where
         // the start context is to be created.
-        let mut context_mapping = unsafe {
-            PerCPUMapping::<MaybeUninit<ApStartContext>>::create(PhysAddr::new(context_pa))?
-        };
+        let mapping = unsafe { LocalMapping::<[u8; PAGE_SIZE]>::map(stub_gpa) }?;
 
         // transition_cr3 is not needed since all TD APs are using the stage2
         // page table set up by the BSP.
-        context_mapping.write(create_ap_start_context(&context, 0));
+        mapping
+            .borrow_at(PAGE_SIZE - size_of::<ApStartContext>())?
+            .write(create_ap_start_context(&context, 0))?;
 
         // When running under Hyper-V, the target vCPU does not begin running
         // until a start hypercall is issued, so make that hypercall now.
@@ -269,19 +269,11 @@ impl SvsmPlatform for TdpPlatform {
             hyperv_start_cpu(cpu, &ctx)?;
         }
 
-        drop(context_mapping);
-
-        // The wakeup mailbox lives at the base of the context page.  While it
-        // would be possible to borrow the same per-CPU page mapping as the
-        // context page, this involves unsafe operations, and creating a
-        // separate mapping is entirely safe.  The optimization of reusing
-        // the existing mapping is not significant enough to be worth the use
-        // of unsafe code.
-        // SAFETY: the physical address is known to point to a mailbox
-        // structure.
-        let mailbox =
-            unsafe { PerCPUMapping::<TdMailbox>::create(PhysAddr::from(SIPI_STUB_GPA as usize))? };
-        wakeup_ap(mailbox.as_ref(), cpu.get_cpu_index());
+        // The wakeup mailbox lives at the base of the context page.
+        let tdmailbox = mapping.borrow::<TdMailbox>()?;
+        // SAFETY: the TD mailbox is never mutably referenced in the codebase.
+        let mailbox = unsafe { tdmailbox.as_ref() };
+        wakeup_ap(mailbox, cpu.get_cpu_index());
 
         Ok(())
     }
