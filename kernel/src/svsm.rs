@@ -375,8 +375,12 @@ fn svsm_init(launch_info: &KernelLaunchInfo) {
 
     init_memory_map(&config, launch_info).expect("Failed to init guest memory map");
 
-    populate_ram_fs(launch_info.kernel_fs_start, launch_info.kernel_fs_end)
-        .expect("Failed to unpack FS archive");
+    // SAFETY: we trust the LAUNCH_INFO addresses. We never mutably reference the
+    // initial RAM filesystem.
+    unsafe {
+        populate_ram_fs(launch_info.kernel_fs_start, launch_info.kernel_fs_end)
+            .expect("Failed to unpack FS archive")
+    }
 
     init_capabilities();
 
