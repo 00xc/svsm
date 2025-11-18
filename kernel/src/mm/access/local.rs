@@ -48,6 +48,9 @@ impl WriteAccess for Local {
     }
 }
 
+pub type LocalMapping<T> = super::Mapping<Local, T>;
+pub type LocalMappingRef<'a, T> = MappingRef<'a, Local, T>;
+
 impl<T> Mapping<Local, T> {
     /// # Safety
     ///

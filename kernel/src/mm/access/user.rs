@@ -6,7 +6,7 @@
 
 extern crate alloc;
 
-use super::{BorrowMapping, MappingRef, ReadAccess, ReadableMapping, WriteAccess};
+use super::{BorrowMapping, Mapping, MappingRef, ReadAccess, ReadableMapping, WriteAccess};
 use crate::address::{Address, VirtAddr};
 use crate::cpu::x86::smap::{clac, stac};
 use crate::error::SvsmError;
@@ -78,6 +78,9 @@ impl WriteAccess for User {
         unimplemented!()
     }
 }
+
+pub type UserMapping<T> = Mapping<User, T>;
+pub type UserMappingRef<'a, T> = MappingRef<'a, User, T>;
 
 impl<T> MappingRef<'_, User, T> {
     fn checked_region(start: VirtAddr, len: usize) -> Result<MemoryRegion<VirtAddr>, SvsmError> {
