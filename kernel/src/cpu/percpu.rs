@@ -25,6 +25,7 @@ use crate::error::{ApicError, SvsmError};
 use crate::hyperv::{self, HypercallPage};
 use crate::hyperv::{HypercallPagesGuard, IS_HYPERV};
 use crate::locking::{LockGuard, RWLock, RWLockIrqSafe, SpinLock};
+use crate::mm::access::{Guest, GuestMappingRef, RwMapping};
 use crate::mm::page_visibility::SharedBox;
 use crate::mm::pagetable::{PTEntryFlags, PageTable};
 use crate::mm::virtualrange::VirtualRange;
@@ -58,7 +59,7 @@ use core::arch::asm;
 use core::cell::{Cell, Ref, RefCell, RefMut, UnsafeCell};
 use core::mem::size_of;
 use core::ops::Deref;
-use core::ptr::{self, NonNull};
+use core::ptr;
 use core::slice::Iter;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use cpuarch::vmsa::VMSA;
@@ -231,20 +232,25 @@ impl GuestVmsaRef {
     }
 
     pub fn vmsa(&mut self) -> &mut VMSA {
+        // TODO: do we need to do the same as with the CAA? The VMSA
+        // seems to live in guest memory, having a mutable reference
+        // does not look sound.
         assert!(self.vmsa.is_some());
         // SAFETY: this function takes &mut self, so only one mutable
         // reference to the underlying VMSA can exist.
         unsafe { SVSM_PERCPU_VMSA_BASE.as_mut_ptr::<VMSA>().as_mut().unwrap() }
     }
 
-    pub fn caa(&self) -> Option<NonNull<SvsmCaa>> {
-        let caa_phys = self.caa_phys()?;
-        let offset = caa_phys.page_offset();
-        let ptr = (SVSM_PERCPU_CAA_BASE + offset).as_mut_ptr();
-        // SAFETY: `SVSM_PERCPU_CAA_BASE` is defined at compile time to
-        // page-aligned and non-zero. Adding a page offset to a page-aligned
-        // address can never overflow.
-        unsafe { Some(NonNull::new_unchecked(ptr)) }
+    // TODO: change the returned lifetime to '_ once the guest VMSA is
+    // converted above ('_ would be the lifetime of &self and since vmsa()
+    // takes &mut self the compiler does not like it)
+    pub fn caa(&self) -> Option<GuestMappingRef<'static, SvsmCaa>> {
+        let offset = self.caa_phys()?.page_offset();
+        let vaddr = SVSM_PERCPU_CAA_BASE + offset;
+        // SAFETY: ca are always validated before being updated
+        // (core_remap_ca(), core_create_vcpu() or prepare_fw_launch()) so
+        // they're safe to use.
+        unsafe { GuestMappingRef::<SvsmCaa>::from_raw(vaddr).ok() }
     }
 }
 
@@ -1054,7 +1060,10 @@ impl PerCpu {
         }
     }
 
-    pub fn update_apic_emulation(&self, vmsa: &mut VMSA, caa: Option<NonNull<SvsmCaa>>) {
+    pub fn update_apic_emulation<M>(&self, vmsa: &mut VMSA, caa: Option<M>)
+    where
+        M: RwMapping<Guest, SvsmCaa>,
+    {
         if let Some(mut apic) = self.guest_apic_mut() {
             apic.present_interrupts(self.shared(), vmsa, caa);
         }

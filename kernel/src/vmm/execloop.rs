@@ -7,10 +7,9 @@
 use super::{set_guest_register, GuestExitMessage, GuestRegister};
 use crate::cpu::percpu::{this_cpu, GuestVmsaRef};
 use crate::cpu::{flush_tlb_global_sync, IrqGuard};
-use crate::mm::GuestPtr;
+use crate::mm::access::{ReadableMapping, WriteableMapping};
 use crate::protocols::errors::SvsmReqError;
 use crate::protocols::RequestParams;
-use crate::requests::SvsmCaa;
 use crate::sev::ghcb::switch_to_vmpl;
 use crate::sev::vmsa::VMSAControl;
 use crate::types::GUEST_VMPL;
@@ -19,25 +18,14 @@ use core::ops::DerefMut;
 use cpuarch::vmsa::GuestVMExit;
 
 fn get_and_clear_caa_request_flag(vmsa_ref: &GuestVmsaRef) -> Result<bool, SvsmReqError> {
-    if let Some(caa) = vmsa_ref.caa() {
-        let calling_area = GuestPtr::<SvsmCaa>::from(caa);
-        // SAFETY: guest vmsa and ca are always validated before beeing updated
-        // (core_remap_ca(), core_create_vcpu() or prepare_fw_launch()) so
-        // they're safe to use.
-        let caa = unsafe { calling_area.read()? };
+    let Some(mut calling_area) = vmsa_ref.caa() else {
+        return Ok(false);
+    };
 
-        let caa_serviced = caa.serviced();
+    let caa = calling_area.read()?;
+    calling_area.write(caa.serviced())?;
 
-        // SAFETY: guest vmsa is always validated before beeing updated
-        // (core_remap_ca() or core_create_vcpu()) so it's safe to use.
-        unsafe {
-            calling_area.write(caa_serviced)?;
-        }
-
-        Ok(caa.call_pending())
-    } else {
-        Ok(false)
-    }
+    Ok(caa.call_pending())
 }
 
 fn get_svsm_request_message(vmsa_ref: &mut GuestVmsaRef) -> Option<GuestExitMessage> {
