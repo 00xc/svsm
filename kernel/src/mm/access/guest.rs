@@ -4,7 +4,7 @@
 //
 // Author: Carlos López <carlos.lopezr4096@gmail.com>
 
-use super::{Mapping, ReadAccess, WriteAccess};
+use super::{Mapping, MappingRef, ReadAccess, WriteAccess};
 use crate::address::PhysAddr;
 use crate::mm::guestmem::do_movsb;
 use crate::{error::SvsmError, mm::memory::valid_phys_region};
@@ -51,6 +51,9 @@ impl WriteAccess for Guest {
         unimplemented!()
     }
 }
+
+pub type GuestMapping<T> = Mapping<Guest, T>;
+pub type GuestMappingRef<'a, T> = MappingRef<'a, Guest, T>;
 
 impl<T> Mapping<Guest, T> {
     /// Maps the given physical address of guest memory. This method is safe

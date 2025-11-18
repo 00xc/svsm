@@ -46,3 +46,6 @@ impl WriteAccess for Shared {
         Ok(())
     }
 }
+
+pub type SharedMapping<T> = super::Mapping<Shared, T>;
+pub type SharedMappingRef<'a, T> = super::MappingRef<'a, Shared, T>;
