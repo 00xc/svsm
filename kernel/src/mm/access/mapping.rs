@@ -14,6 +14,7 @@ use super::{
 use crate::address::{Address, PhysAddr, VirtAddr};
 use crate::cpu::{flush_address_percpu, percpu::this_cpu};
 use crate::error::SvsmError;
+use crate::fs::Buffer;
 use crate::mm::pagetable::PTEntryFlags;
 use crate::types::PageSize;
 use crate::utils::MemoryRegion;
@@ -569,6 +570,50 @@ where
         // type.
         unsafe { A::write_bytes(self.as_mut_ptr::<u8>(), self.len(), val) }?;
         Ok(())
+    }
+}
+
+impl<A> Buffer for Mapping<A, [u8]>
+where
+    A: ReadAccess + WriteAccess,
+{
+    fn read_buffer(&self, buf: &mut [u8], offset: usize) -> Result<usize, SvsmError> {
+        self.as_borrow().read_buffer(buf, offset)
+    }
+
+    fn write_buffer(&mut self, buf: &[u8], offset: usize) -> Result<usize, SvsmError> {
+        self.as_borrow().write_buffer(buf, offset)
+    }
+
+    fn size(&self) -> usize {
+        self.as_borrow().len()
+    }
+}
+
+impl<A> Buffer for MappingRef<'_, A, [u8]>
+where
+    A: ReadAccess + WriteAccess,
+{
+    fn read_buffer(&self, buf: &mut [u8], offset: usize) -> Result<usize, SvsmError> {
+        let size = core::cmp::min(buf.len(), self.len().checked_sub(offset).unwrap());
+        if size > 0 {
+            self.borrow_slice_at(offset, size)?
+                .read_to(&mut buf[..size])?;
+        }
+        Ok(size)
+    }
+
+    fn write_buffer(&mut self, buf: &[u8], offset: usize) -> Result<usize, SvsmError> {
+        let size = core::cmp::min(buf.len(), self.len().checked_sub(offset).unwrap());
+        if size > 0 {
+            self.borrow_slice_at(offset, size)?
+                .write_from(&buf[..size])?;
+        }
+        Ok(size)
+    }
+
+    fn size(&self) -> usize {
+        self.len()
     }
 }
 
