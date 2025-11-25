@@ -5,10 +5,9 @@
 // Author: Joerg Roedel <jroedel@suse.de>
 
 use super::obj::obj_close;
-use crate::address::VirtAddr;
 use crate::cpu::percpu::current_task;
 use crate::fs::find_dir;
-use crate::mm::guestmem::UserPtr;
+use crate::mm::access::UserMappingRef;
 use crate::task::{current_task_terminated, exec_user, schedule};
 use core::ffi::c_char;
 use syscall::SysCallError;
@@ -24,8 +23,8 @@ pub fn sys_exit(exit_code: u32) -> ! {
 }
 
 pub fn sys_exec(file: usize, root: usize, _flags: usize) -> Result<u64, SysCallError> {
-    let user_file_ptr = UserPtr::<c_char>::new(VirtAddr::from(file));
-    let user_root_ptr = UserPtr::<c_char>::new(VirtAddr::from(root));
+    let user_file_ptr = UserMappingRef::<c_char>::from_raw_checked(file)?;
+    let user_root_ptr = UserMappingRef::<c_char>::from_raw_checked(root)?;
 
     let file_str = user_file_ptr.read_c_string()?;
     let root_str = user_root_ptr.read_c_string()?;
