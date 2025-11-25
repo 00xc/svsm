@@ -41,11 +41,13 @@ use core::borrow::Borrow;
 use core::ops::Index;
 use zerocopy::{FromBytes, IntoBytes};
 
+mod guest;
 mod local;
 mod mapping;
 mod shared;
 mod user;
 
+pub use guest::*;
 pub use local::*;
 pub use mapping::*;
 pub use shared::*;
