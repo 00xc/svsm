@@ -7,20 +7,15 @@
 extern crate alloc;
 
 use crate::address::{Address, PhysAddr, VirtAddr};
-use crate::cpu::x86::smap::{clac, stac};
 use crate::error::SvsmError;
-use crate::mm::{
-    memory::valid_phys_region, ptguards::PerCPUPageMappingGuard, USER_MEM_END, USER_MEM_START,
-};
+use crate::mm::{memory::valid_phys_region, ptguards::PerCPUPageMappingGuard};
 use crate::utils::MemoryRegion;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::ffi::c_char;
 use core::mem::{size_of, MaybeUninit};
-use core::ptr::{with_exposed_provenance, with_exposed_provenance_mut, NonNull};
+use core::ptr::NonNull;
+use core::ptr::{with_exposed_provenance, with_exposed_provenance_mut};
 use core::slice;
-use syscall::PATH_MAX;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 /// Read one byte from a virtual address.
@@ -414,163 +409,6 @@ impl<T> GuestPtr<T> {
 impl<T> From<NonNull<T>> for GuestPtr<T> {
     fn from(value: NonNull<T>) -> Self {
         Self::from_ptr(value.as_ptr())
-    }
-}
-
-struct UserAccessGuard;
-
-impl UserAccessGuard {
-    pub fn new() -> Self {
-        stac();
-        Self
-    }
-}
-
-impl Drop for UserAccessGuard {
-    fn drop(&mut self) {
-        clac();
-    }
-}
-
-#[derive(Debug)]
-pub struct UserPtr<T> {
-    guest_ptr: GuestPtr<T>,
-}
-
-impl<T> UserPtr<T> {
-    #[inline]
-    pub fn new(v: VirtAddr) -> Self {
-        Self {
-            guest_ptr: GuestPtr::new(v),
-        }
-    }
-
-    fn check_bounds(&self) -> bool {
-        let v = VirtAddr::from(self.guest_ptr.ptr);
-
-        (USER_MEM_START..USER_MEM_END).contains(&v)
-            && (USER_MEM_START..USER_MEM_END).contains(&(v + size_of::<T>()))
-    }
-
-    #[inline]
-    pub fn read(&self) -> Result<T, SvsmError>
-    where
-        T: FromBytes,
-    {
-        if !self.check_bounds() {
-            return Err(SvsmError::InvalidAddress);
-        }
-        let _guard = UserAccessGuard::new();
-        // SAFETY: Target pointer is guaranteed to point to user memory.
-        unsafe { self.guest_ptr.read() }
-    }
-
-    /// Attempts to read the `T` behind the pointer, verifying it has a valid
-    /// representation in the process (see [`GuestPtr::try_read`]).
-    #[inline]
-    pub fn try_read(&self) -> Result<T, SvsmError>
-    where
-        T: TryFromBytes,
-    {
-        if !self.check_bounds() {
-            return Err(SvsmError::InvalidAddress);
-        }
-        let _guard = UserAccessGuard::new();
-        // SAFETY: Target pointer is guaranteed to point to user memory.
-        unsafe { self.guest_ptr.try_read() }
-    }
-
-    #[inline]
-    pub fn write(&self, buf: T) -> Result<(), SvsmError>
-    where
-        T: IntoBytes,
-    {
-        self.write_ref(&buf)
-    }
-
-    #[inline]
-    pub fn write_ref(&self, buf: &T) -> Result<(), SvsmError>
-    where
-        T: IntoBytes,
-    {
-        if !self.check_bounds() {
-            return Err(SvsmError::InvalidAddress);
-        }
-        let _guard = UserAccessGuard::new();
-        // SAFETY: Target pointer is guaranteed to point to user memory.
-        unsafe { self.guest_ptr.write_ref(buf) }
-    }
-
-    #[inline]
-    pub const fn cast<N>(&self) -> UserPtr<N> {
-        UserPtr {
-            guest_ptr: self.guest_ptr.cast(),
-        }
-    }
-
-    #[inline]
-    pub fn offset(&self, count: isize) -> UserPtr<T> {
-        UserPtr {
-            guest_ptr: self.guest_ptr.offset(count),
-        }
-    }
-}
-
-impl UserPtr<c_char> {
-    /// Reads a null-terminated C string from the user space.
-    /// Allocates memory for the string and returns a `String`.
-    pub fn read_c_string(&self) -> Result<String, SvsmError> {
-        let mut buffer = Vec::new();
-
-        for offset in 0..PATH_MAX {
-            let current_ptr = self.offset(offset as isize);
-            let char_result = current_ptr.read()?;
-            match char_result {
-                0 => return String::from_utf8(buffer).map_err(|_| SvsmError::InvalidUtf8),
-                c => buffer.push(c as u8),
-            }
-        }
-        Err(SvsmError::InvalidBytes)
-    }
-}
-
-fn check_bounds_user(start: usize, len: usize) -> Result<(), SvsmError> {
-    let end: usize = start.checked_add(len).ok_or(SvsmError::InvalidAddress)?;
-
-    if end > USER_MEM_END.bits() {
-        Err(SvsmError::InvalidAddress)
-    } else {
-        Ok(())
-    }
-}
-
-pub fn copy_from_user(src: VirtAddr, dst: &mut [u8]) -> Result<(), SvsmError> {
-    let destination = dst.as_mut_ptr();
-    let size = dst.len();
-
-    check_bounds_user(src.bits(), size)?;
-
-    // SAFETY: Safe because the copy only happens to the memory belonging to
-    // the dst slice from user-mode memory.
-    unsafe {
-        let _guard = UserAccessGuard::new();
-        let source = with_exposed_provenance::<u8>(src.bits());
-        copy_bytes(source, destination, size)
-    }
-}
-
-pub fn copy_to_user(src: &[u8], dst: VirtAddr) -> Result<(), SvsmError> {
-    let source = src.as_ptr();
-    let size = src.len();
-
-    check_bounds_user(dst.bits(), size)?;
-
-    // SAFETY: Only reads data from with the slice and copies to an address
-    // guaranteed to be in user-space.
-    unsafe {
-        let _guard = UserAccessGuard::new();
-        let destination = with_exposed_provenance_mut::<u8>(dst.bits());
-        copy_bytes(source, destination, size)
     }
 }
 
