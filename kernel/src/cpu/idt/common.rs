@@ -4,8 +4,6 @@
 //
 // Author: Joerg Roedel <jroedel@suse.de>
 
-extern crate alloc;
-
 use crate::address::{Address, VirtAddr};
 use crate::cpu::control_regs::{read_cr0, read_cr4};
 use crate::cpu::efer::read_efer;
@@ -13,13 +11,13 @@ use crate::cpu::gdt::GLOBAL_GDT;
 use crate::cpu::registers::{X86GeneralRegs, X86InterruptFrame};
 use crate::cpu::shadow_stack::is_cet_ss_enabled;
 use crate::error::SvsmError;
-use crate::insn_decode::{InsnError, InsnMachineCtx, InsnMachineMem, Register, SegRegister};
+use crate::insn_decode::{InsnError, InsnMachineCtx, Register, SegRegister};
+use crate::mm::access::MappingRef;
 use crate::mm::ro_after_init::make_ro;
-use crate::mm::{GuestPtr, PageBox, PAGE_SIZE};
+use crate::mm::{PageBox, PAGE_SIZE};
 use crate::platform::SVSM_PLATFORM;
 use crate::types::{Bytes, SVSM_CS};
 use crate::utils::{is_aligned, MemoryRegion};
-use alloc::boxed::Box;
 use core::arch::asm;
 use core::mem;
 use zerocopy::{FromBytes, IntoBytes};
@@ -171,16 +169,17 @@ impl InsnMachineCtx for X86ExceptionContext {
         self.frame.cs & 3
     }
 
-    fn map_linear_addr<T: FromBytes + IntoBytes + 'static>(
+    unsafe fn map_linear_addr<A, T: FromBytes + IntoBytes>(
         &self,
         la: usize,
         _write: bool,
         _fetch: bool,
-    ) -> Result<Box<dyn InsnMachineMem<Item = T>>, InsnError> {
+    ) -> Result<MappingRef<'_, A, T>, InsnError> {
         if user_mode(self) {
             todo!();
         } else {
-            Ok(Box::new(GuestPtr::<T>::new(VirtAddr::from(la))))
+            // SAFETY: caller must uphold safety requirements
+            unsafe { MappingRef::<_, T>::from_raw(la).map_err(|_| InsnError::MapLinearAddr) }
         }
     }
 
