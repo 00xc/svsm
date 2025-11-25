@@ -42,9 +42,11 @@ use core::ops::Index;
 use zerocopy::{FromBytes, IntoBytes};
 
 mod mapping;
+mod shared;
 mod user;
 
 pub use mapping::*;
+pub use shared::*;
 pub use user::*;
 
 /// A low-level trait that implements a raw memory read.
