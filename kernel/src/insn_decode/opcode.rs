@@ -28,6 +28,8 @@ bitflags! {
         const OP_NONE       = 1 << 5;
         // Need to decode Moffset
         const MOFFSET       = 1 << 6;
+        // The reg field in ModRm specifies a debug register
+        const MODRM_REG_DBG = 1 << 7;
     }
 }
 
@@ -181,6 +183,8 @@ static TWO_BYTE_TABLE: [Option<OpCodeDesc>; 256] = {
     let mut table = [None; 256];
 
     table[0x01] = opcode!(OpCodeClass::Group7);
+    table[0x21] = opcode!(0x21, OpCodeClass::Mov, OpCodeFlags::MODRM_REG_DBG.bits());
+    table[0x23] = opcode!(0x23, OpCodeClass::Mov, OpCodeFlags::MODRM_REG_DBG.bits());
     table[0x30] = opcode!(0x30, OpCodeClass::Wrmsr, OpCodeFlags::NO_MODRM.bits());
     table[0x31] = opcode!(0x31, OpCodeClass::Rdtsc, OpCodeFlags::NO_MODRM.bits());
     table[0x32] = opcode!(0x32, OpCodeClass::Rdmsr, OpCodeFlags::NO_MODRM.bits());
@@ -244,6 +248,7 @@ impl OpCodeDesc {
     /// A Some(OpCodeDesc) if the opcode is supported or None otherwise
     pub fn decode(insn: &mut OpCodeBytes) -> Option<OpCodeDesc> {
         let mut opdesc = Self::one_byte(insn);
+        log::info!("OpCodeDesc::decode(): one_byte: {opdesc:?}");
 
         loop {
             if let Some(desc) = opdesc {
@@ -252,7 +257,8 @@ impl OpCodeDesc {
                     OpCodeClass::Group7 => Self::group7(insn),
                     OpCodeClass::Group7Rm7 => Self::group7_rm7(insn),
                     _ => return opdesc,
-                }
+                };
+                log::info!("OpCodeDesc::decode(): next: {opdesc:?}");
             } else {
                 return None;
             }

@@ -23,6 +23,7 @@ use core::fmt;
 #[cfg(test)]
 use crate::testutils::{has_qemu_testdev, is_test_platform_type};
 
+pub const SVM_EXIT_DR_BASE: usize = 0x20;
 pub const SVM_EXIT_EXCP_BASE: usize = 0x40;
 pub const SVM_EXIT_LAST_EXCP: usize = 0x5f;
 pub const SVM_EXIT_RDTSC: usize = 0x6e;
@@ -160,6 +161,14 @@ pub fn handle_vc_exception(ctx: &mut X86ExceptionContext, vector: usize) -> Resu
 
     let insn_ctx = vc_decode_insn(ctx)?;
 
+    if let Some(ctx) = insn_ctx.as_ref() {
+        log::info!("#VC: ctx: {ctx:?}");
+        if let Some(insn) = ctx.insn() {
+            log::info!("#VC: ins: {insn:?}");
+        }
+    }
+    log::info!("#VC: error_code: {error_code:?}");
+
     match (error_code, insn_ctx.as_ref().and_then(|d| d.insn())) {
         // If the gdb stub is enabled then debugging operations such as single stepping
         // will cause either an exception via DB_VECTOR if the DEBUG_SWAP sev_feature is
@@ -173,11 +182,18 @@ pub fn handle_vc_exception(ctx: &mut X86ExceptionContext, vector: usize) -> Resu
         (SVM_EXIT_MSR, Some(ins)) => handle_msr(ctx, ghcb, ins),
         (SVM_EXIT_RDTSC, Some(DecodedInsn::Rdtsc)) => ghcb.rdtsc_regs(&mut ctx.regs),
         (SVM_EXIT_RDTSCP, Some(DecodedInsn::Rdtscp)) => ghcb.rdtscp_regs(&mut ctx.regs),
+        (_, Some(DecodedInsn::Mov)) if vc_is_dr_read_write(error_code) => {
+            handle_dr_read_write(ctx, &insn_ctx.unwrap())
+        }
         _ => Err(VcError::new(ctx, VcErrorType::Unsupported).into()),
     }?;
 
     vc_finish_insn(ctx, &insn_ctx);
     Ok(())
+}
+
+fn vc_is_dr_read_write(error_code: usize) -> bool {
+    (SVM_EXIT_DR_BASE..SVM_EXIT_EXCP_BASE).contains(&error_code)
 }
 
 #[inline]
@@ -299,6 +315,12 @@ fn handle_ioio(ctx: &mut X86ExceptionContext, insn_ctx: &DecodedInsnCtx) -> Resu
     insn_ctx.emulate_ioio(ctx).map_err(SvsmError::from)
 }
 
+fn handle_dr_read_write(
+    ctx: &mut X86ExceptionContext,
+    insn_ctx: &DecodedInsnCtx,
+) -> Result<(), SvsmError> {
+    insn_ctx.emulate_mov(ctx).map_err(SvsmError::from)
+}
 fn vc_decode_insn(ctx: &X86ExceptionContext) -> Result<Option<DecodedInsnCtx>, SvsmError> {
     if !vc_decoding_needed(ctx.error_code) {
         return Ok(None);
@@ -726,7 +748,7 @@ mod tests {
 
     #[test]
     // #[cfg_attr(not(test_in_svsm), ignore = "Can only be run inside guest")]
-    #[ignore = "Currently unhandled by #VC handler"]
+    // #[ignore = "Currently unhandled by #VC handler"]
     fn test_read_write_dr7() {
         if has_qemu_testdev() && is_test_platform_type(SvsmPlatformType::Snp) {
             const DR7_DEFAULT: u64 = 0x400;

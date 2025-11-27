@@ -56,7 +56,7 @@ use core::mem::size_of;
 use core::ops::Deref;
 use core::ptr;
 use core::slice::Iter;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use cpuarch::vmsa::VMSA;
 
 // PERCPU areas virtual addresses into shared memory
@@ -396,6 +396,12 @@ pub struct PerCpu {
 
     /// Stack boundaries of the currently running task.
     current_stack: Cell<MemoryRegion<VirtAddr>>,
+
+    /// Cached DR7 value. Update it when the guest attempts to write DR7,
+    /// and return it when the guest attempts to read it.
+    /// That value will never make it to the real hardware DR7 as debugging
+    /// is currently unsupported in SEV-ES guests.
+    dr7: AtomicU64,
 }
 
 impl PerCpu {
@@ -428,6 +434,8 @@ impl PerCpu {
             context_switch_stack: Cell::new(None),
             ist: IstStacks::new(),
             current_stack: Cell::new(MemoryRegion::new(VirtAddr::null(), 0)),
+            // DR7 reset value
+            dr7: AtomicU64::new(0x400),
         }
     }
 
@@ -1173,6 +1181,20 @@ impl PerCpu {
         unsafe {
             self.tss.set_rsp0(addr);
         }
+    }
+
+    pub fn get_dr7(&self) -> u64 {
+        self.dr7.load(Ordering::Relaxed)
+    }
+
+    pub fn set_dr7(&self, val: u64) -> Result<(), SvsmError> {
+        log::info!("set_dr7(0x{val:x})");
+        if let Some(ghcb) = self.ghcb() {
+            log::info!("VMGEXIT DR7");
+            ghcb.write_dr7(val)?;
+            self.dr7.store(val, Ordering::Relaxed);
+        }
+        Ok(())
     }
 }
 

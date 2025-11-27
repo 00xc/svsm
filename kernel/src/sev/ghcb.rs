@@ -94,6 +94,7 @@ impl From<GhcbError> for SvsmError {
 #[repr(u64)]
 #[expect(non_camel_case_types, clippy::upper_case_acronyms)]
 enum GHCBExitCode {
+    WRITE_DR7 = 0x37,
     RDTSC = 0x6e,
     CPUID = 0x72,
     IOIO = 0x7b,
@@ -414,6 +415,14 @@ impl GHCB {
         let (rax, rdx) = self.rdmsr_raw(u32::try_from(regs.rcx).unwrap())?;
         regs.rdx = rdx as usize;
         regs.rax = rax as usize;
+        Ok(())
+    }
+
+    pub fn write_dr7(&self, val: u64) -> Result<(), SvsmError> {
+        self.clear();
+        // Using a value of 0 for ExitInfo1 means RAX holds the value
+        self.set_rax_valid(val);
+        self.vmgexit(GHCBExitCode::WRITE_DR7, 0, 0)?;
         Ok(())
     }
 

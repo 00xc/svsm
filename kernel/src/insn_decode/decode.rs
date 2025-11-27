@@ -399,6 +399,48 @@ fn get_cpu_mode<I: InsnMachineCtx>(mctx: &I) -> CpuMode {
 // Translate the decoded number from the instruction ModR/M
 // or SIB to the corresponding register
 struct RegCode(u8);
+
+impl Register {
+    /// Attempt to translate the decoded number from the instruction
+    /// ModR/M or SIB into the corresponding general purpose register.
+    fn try_general(val: RegCode) -> Result<Self, InsnError> {
+        match val.0 {
+            0 => Ok(Register::Rax),
+            1 => Ok(Register::Rcx),
+            2 => Ok(Register::Rdx),
+            3 => Ok(Register::Rbx),
+            4 => Ok(Register::Rsp),
+            5 => Ok(Register::Rbp),
+            6 => Ok(Register::Rsi),
+            7 => Ok(Register::Rdi),
+            8 => Ok(Register::R8),
+            9 => Ok(Register::R9),
+            10 => Ok(Register::R10),
+            11 => Ok(Register::R11),
+            12 => Ok(Register::R12),
+            13 => Ok(Register::R13),
+            14 => Ok(Register::R14),
+            15 => Ok(Register::R15),
+            // Rip is not represented by ModR/M or SIB
+            _ => Err(InsnError::InvalidRegister),
+        }
+    }
+
+    fn try_debug(val: RegCode) -> Result<Self, InsnError> {
+        match val.0 {
+            0 => Ok(Self::Dr0),
+            1 => Ok(Self::Dr1),
+            2 => Ok(Self::Dr2),
+            3 => Ok(Self::Dr3),
+            4 => Ok(Self::Dr4),
+            5 => Ok(Self::Dr5),
+            6 => Ok(Self::Dr6),
+            7 => Ok(Self::Dr7),
+            _ => Err(InsnError::InvalidRegister),
+        }
+    }
+}
+
 impl TryFrom<RegCode> for Register {
     type Error = InsnError;
 
@@ -763,6 +805,7 @@ impl DecodedInsnCtx {
         bytes: &[u8; MAX_INSN_SIZE],
         mctx: &I,
     ) -> Result<(), InsnError> {
+        log::info!("decode: bytes: {bytes:x?}");
         self.decode_prefixes(bytes, mctx)
             .and_then(|insn| self.decode_opcode(insn))
             .and_then(|insn| self.decode_modrm_sib(insn))
@@ -891,6 +934,7 @@ impl DecodedInsnCtx {
 
     fn decode_opcode(&mut self, mut insn: OpCodeBytes) -> Result<ModRmBytes, InsnError> {
         let opdesc = OpCodeDesc::decode(&mut insn).ok_or(InsnError::DecodeOpCode)?;
+        log::info!("decode_opcode: opdesc: {opdesc:?}");
 
         if opdesc.flags.contains(OpCodeFlags::BYTE_OP) {
             self.opsize = Bytes::One;
@@ -921,13 +965,25 @@ impl DecodedInsnCtx {
 
         let r#mod = self.modrm.get_mod();
         let reg = self.modrm.get_reg() | ((self.prefix.contains(PrefixFlags::REX_R) as u8) << 3);
-        self.modrm_reg = Some(Register::try_from(RegCode(reg))?);
+        self.modrm_reg = if self
+            .get_opdesc()?
+            .flags
+            .contains(OpCodeFlags::MODRM_REG_DBG)
+        {
+            Some(Register::try_debug(RegCode(reg))?)
+        } else {
+            Some(Register::try_general(RegCode(reg))?)
+        };
+
+        log::info!("modrm_reg: {:?}", self.modrm_reg);
+        log::info!("R/M: {:?}", self.modrm.get_rm());
 
         // As the modrm decoding is majorly for MMIO instructions which requires
         // a memory access, a direct addressing mode makes no sense in the context.
         // There has to be a memory access involved to trap the MMIO instruction.
         if r#mod == Mod::Direct {
-            return Err(InsnError::DecodeModRM);
+            log::info!("decode: direct MOD");
+            // return Err(InsnError::DecodeModRM);
         }
 
         // SDM Vol2 Table 2-5: Special Cases of REX Encodings
@@ -965,6 +1021,8 @@ impl DecodedInsnCtx {
                 return self.decode_sib(SibBytes(insn.0));
             }
         };
+
+        log::info!("Ok!");
 
         insn.0.advance();
         Ok((DisBytes(insn.0), disp_bytes))
@@ -1524,7 +1582,7 @@ impl DecodedInsnCtx {
             })
     }
 
-    fn emulate_mov<I: InsnMachineCtx>(&self, mctx: &mut I) -> Result<(), InsnError> {
+    pub fn emulate_mov<I: InsnMachineCtx>(&self, mctx: &mut I) -> Result<(), InsnError> {
         if self.prefix.contains(PrefixFlags::REPZ_P) {
             return Err(InsnError::UnSupportedInsn);
         }
@@ -1539,6 +1597,21 @@ impl DecodedInsnCtx {
         let ea = self.cal_effective_addr(mctx)?;
 
         match self.get_opdesc()?.code {
+            0x21 => {
+                log::info!("0x21 (read dr7)");
+                // Mov debug register to general purpose register
+                let dst = self.base_reg.ok_or(InsnError::InvalidDecode)?;
+                let src = self.get_modrm_reg()?;
+                let val = mctx.read_reg(src);
+                mctx.write_reg(dst, val);
+            }
+            0x23 => {
+                // Mov general purpose register to debug register
+                let dst = self.get_modrm_reg()?;
+                let src = self.base_reg.ok_or(InsnError::InvalidDecode)?;
+                let val = mctx.read_reg(src);
+                mctx.write_reg(dst, val);
+            }
             0x88 => {
                 // Mov byte from reg (ModRM:reg) to mem (ModRM:r/m)
                 // 88/r:	mov r/m8, r8

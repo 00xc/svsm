@@ -36,6 +36,14 @@ pub enum Register {
     R14,
     R15,
     Rip,
+    Dr0,
+    Dr1,
+    Dr2,
+    Dr3,
+    Dr4,
+    Dr5,
+    Dr6,
+    Dr7,
 }
 
 /// A Segment register in instruction
@@ -217,6 +225,7 @@ pub mod test_utils {
                 Register::R14 => self.r14,
                 Register::R15 => self.r15,
                 Register::Rip => self.rip,
+                _ => todo!(),
             }
         }
 
@@ -239,6 +248,7 @@ pub mod test_utils {
                 Register::R14 => self.r14 = val,
                 Register::R15 => self.r15 = val,
                 Register::Rip => self.rip = val,
+                _ => todo!(),
             }
         }
 
