@@ -46,13 +46,13 @@ use crate::types::{
     PAGE_SHIFT, PAGE_SHIFT_2M, PAGE_SIZE, PAGE_SIZE_2M, SVSM_TR_ATTRIBUTES, SVSM_TSS,
 };
 use crate::utils::immut_after_init::ImmutAfterInitCell;
-use crate::utils::MemoryRegion;
+use crate::utils::{MemoryRegion, PerCpuCell, PerCpuRef, PerCpuRefMut};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::cell::{Cell, Ref, RefCell, RefMut, UnsafeCell};
+use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::ops::Deref;
 use core::ptr;
@@ -366,27 +366,27 @@ pub struct PerCpu {
     /// PerCpu IRQ state tracking
     irq_state: IrqState,
 
-    pgtbl: RefCell<Option<&'static mut PageTable>>,
+    pgtbl: PerCpuCell<Option<&'static mut PageTable>>,
     tss: X86Tss,
-    isst: Cell<Isst>,
+    isst: PerCpuCell<Isst>,
     svsm_vmsa: ImmutAfterInitCell<VmsaPage>,
     reset_ip: AtomicU64,
     /// PerCpu Virtual Memory Range
     vm_range: VMR,
     /// Address allocator for per-cpu 4k temporary mappings
-    pub vrange_4k: RefCell<VirtualRange>,
+    pub vrange_4k: PerCpuCell<VirtualRange>,
     /// Address allocator for per-cpu 2m temporary mappings
-    pub vrange_2m: RefCell<VirtualRange>,
+    pub vrange_2m: PerCpuCell<VirtualRange>,
     /// Task list that has been assigned for scheduling on this CPU
     runqueue: RWLockIrqSafe<RunQueue>,
     /// Local APIC state for APIC emulation if enabled
-    guest_apic: RefCell<Option<LocalApic>>,
+    guest_apic: PerCpuCell<Option<LocalApic>>,
 
     /// GHCB page for this CPU.
     ghcb: ImmutAfterInitCell<GhcbPage>,
 
     /// Hypercall input/output pages for this CPU if running under Hyper-V.
-    hypercall_pages: RefCell<Option<(HypercallPage, HypercallPage)>>,
+    hypercall_pages: PerCpuCell<Option<(HypercallPage, HypercallPage)>>,
 
     /// `#HV` doorbell page for this CPU.
     hv_doorbell: ImmutAfterInitCell<SharedBox<HVDoorbell>>,
@@ -396,18 +396,18 @@ pub struct PerCpu {
     ist: IstStacks,
 
     /// Stack boundaries of the currently running task.
-    current_stack: Cell<MemoryRegion<VirtAddr>>,
+    current_stack: PerCpuCell<MemoryRegion<VirtAddr>>,
 }
 
 impl PerCpu {
     /// Creates a new default [`PerCpu`] struct.
     fn new(shared: &'static PerCpuShared) -> Self {
         Self {
-            pgtbl: RefCell::new(None),
+            pgtbl: PerCpuCell::new(None),
             apic: X86Apic::default(),
             irq_state: IrqState::new(),
             tss: X86Tss::new(),
-            isst: Cell::new(Isst::default()),
+            isst: PerCpuCell::new(Isst::default()),
             svsm_vmsa: ImmutAfterInitCell::uninit(),
             reset_ip: AtomicU64::new(0xffff_fff0),
             vm_range: {
@@ -416,19 +416,19 @@ impl PerCpu {
                 vmr
             },
 
-            vrange_4k: RefCell::new(VirtualRange::new()),
-            vrange_2m: RefCell::new(VirtualRange::new()),
+            vrange_4k: PerCpuCell::new(VirtualRange::new()),
+            vrange_2m: PerCpuCell::new(VirtualRange::new()),
             runqueue: RWLockIrqSafe::new(RunQueue::new()),
-            guest_apic: RefCell::new(None),
+            guest_apic: PerCpuCell::new(None),
 
             shared,
             ghcb: ImmutAfterInitCell::uninit(),
-            hypercall_pages: RefCell::new(None),
+            hypercall_pages: PerCpuCell::new(None),
             hv_doorbell: ImmutAfterInitCell::uninit(),
             init_shadow_stack: ImmutAfterInitCell::uninit(),
             context_switch_stack: ImmutAfterInitCell::uninit(),
             ist: IstStacks::new(),
-            current_stack: Cell::new(MemoryRegion::new(VirtAddr::null(), 0)),
+            current_stack: PerCpuCell::new(MemoryRegion::new(VirtAddr::null(), 0)),
         }
     }
 
@@ -554,9 +554,8 @@ impl PerCpu {
     pub fn get_hypercall_pages(&self) -> HypercallPagesGuard<'_> {
         // The hypercall page cell is never mutated, but is borrowed mutably
         // to ensure that only a single reference can ever be taken at a time.
-        let page_ref: RefMut<'_, Option<(HypercallPage, HypercallPage)>> =
-            self.hypercall_pages.borrow_mut();
-        HypercallPagesGuard::new(RefMut::map(page_ref, |o| o.as_mut().unwrap()))
+        let page_ref = self.hypercall_pages.borrow_mut();
+        HypercallPagesGuard::new(PerCpuRefMut::map(page_ref, |o| o.as_mut().unwrap()))
     }
 
     pub fn hv_doorbell(&self) -> Option<&HVDoorbell> {
@@ -604,7 +603,7 @@ impl PerCpu {
     }
 
     pub fn set_current_stack(&self, stack: MemoryRegion<VirtAddr>) {
-        self.current_stack.set(stack);
+        self.current_stack.replace(stack);
     }
 
     pub fn get_cpu_index(&self) -> usize {
@@ -691,8 +690,8 @@ impl PerCpu {
         Ok(())
     }
 
-    pub fn get_pgtable(&self) -> RefMut<'_, PageTable> {
-        RefMut::map(self.pgtbl.borrow_mut(), |pgtbl| {
+    pub fn get_pgtable(&self) -> PerCpuRefMut<'_, PageTable> {
+        PerCpuRefMut::map(self.pgtbl.borrow_mut(), |pgtbl| {
             &mut **pgtbl.as_mut().unwrap()
         })
     }
@@ -724,9 +723,9 @@ impl PerCpu {
 
     fn setup_isst(&self) {
         let double_fault_shadow_stack = self.get_top_of_df_shadow_stack().unwrap();
-        let mut isst = self.isst.get();
-        isst.set(IST_DF, double_fault_shadow_stack);
-        self.isst.set(isst);
+        self.isst
+            .borrow_mut()
+            .set(IST_DF, double_fault_shadow_stack);
     }
 
     pub fn map_self_stage2(&self) -> Result<(), SvsmError> {
@@ -970,16 +969,16 @@ impl PerCpu {
 
     /// Returns a shared reference to the local APIC, or `None` if APIC
     /// emulation is not enabled.
-    fn guest_apic(&self) -> Option<Ref<'_, LocalApic>> {
+    fn guest_apic(&self) -> Option<PerCpuRef<'_, LocalApic>> {
         let apic = self.guest_apic.borrow();
-        Ref::filter_map(apic, Option::as_ref).ok()
+        PerCpuRef::filter_map(apic, Option::as_ref).ok()
     }
 
     /// Returns a mutable reference to the local APIC, or `None` if APIC
     /// emulation is not enabled.
-    fn guest_apic_mut(&self) -> Option<RefMut<'_, LocalApic>> {
+    fn guest_apic_mut(&self) -> Option<PerCpuRefMut<'_, LocalApic>> {
         let apic = self.guest_apic.borrow_mut();
-        RefMut::filter_map(apic, Option::as_mut).ok()
+        PerCpuRefMut::filter_map(apic, Option::as_mut).ok()
     }
 
     fn unmap_caa(&self) {
