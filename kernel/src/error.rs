@@ -32,6 +32,7 @@ use crate::syscall::ObjError;
 use crate::task::TaskError;
 use crate::tdx::TdxError;
 use crate::utils::immut_after_init::ImmutAfterInitError;
+use crate::utils::percpu_cell::ReentrancyError;
 #[cfg(feature = "virtio-drivers")]
 use crate::virtio::VirtioError;
 use elf::ElfError;
@@ -132,6 +133,8 @@ pub enum SvsmError {
     TeeAttestation(AttestationError),
     /// Errors related to ImmutAfterInitCell
     ImmutAfterInit(ImmutAfterInitError),
+    /// Errors related to per-CPU reentrancy
+    Reentrancy(ReentrancyError),
 }
 
 impl From<ElfError> for SvsmError {
