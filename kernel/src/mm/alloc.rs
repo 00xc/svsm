@@ -1982,15 +1982,14 @@ impl<const N: u16> SlabCommon<N> {
         assert_ne!(self.free, 0);
         let mut page = &mut self.page;
         loop {
-            let free = page.get_free();
-
             if let Ok(vaddr) = page.allocate() {
+                let free = page.get_free();
                 let capacity = page.get_capacity();
                 self.free -= 1;
 
-                if free == capacity {
+                if free == capacity - 1 {
                     self.free_pages -= 1;
-                } else if free == 1 {
+                } else if free == 0 {
                     self.full_pages += 1;
                 }
 
@@ -2016,15 +2015,14 @@ impl<const N: u16> SlabCommon<N> {
     unsafe fn deallocate_slot(&mut self, vaddr: VirtAddr) {
         let mut page = &mut self.page;
         loop {
-            let free = page.get_free();
-
             if let Ok(_o) = page.free(vaddr) {
+                let free = page.get_free();
                 let capacity = page.get_capacity();
                 self.free += 1;
 
-                if free == 0 {
+                if free == 1 {
                     self.full_pages -= 1;
-                } else if free + 1 == capacity {
+                } else if free == capacity {
                     self.free_pages += 1;
                 }
 
