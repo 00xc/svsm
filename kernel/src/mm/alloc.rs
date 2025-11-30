@@ -1801,7 +1801,6 @@ pub fn memory_info() -> MemInfo {
 #[derive(Debug, Default)]
 struct SlabPage<const N: u16> {
     vaddr: VirtAddr,
-    free: u16,
     used_bitmap: [u64; 2],
     next_page: Option<NonNull<Self>>,
 }
@@ -1819,7 +1818,6 @@ impl<const N: u16> SlabPage<N> {
         const { assert!(N <= (PAGE_SIZE / 2) as u16) };
         Self {
             vaddr: VirtAddr::null(),
-            free: 0,
             used_bitmap: [0; 2],
             next_page: None,
         }
@@ -1831,7 +1829,6 @@ impl<const N: u16> SlabPage<N> {
             return Ok(());
         }
         self.vaddr = ROOT_MEM.lock().allocate_slab_page::<N>()?;
-        self.free = self.get_capacity();
 
         Ok(())
     }
@@ -1852,7 +1849,8 @@ impl<const N: u16> SlabPage<N> {
     }
 
     fn get_free(&self) -> u16 {
-        self.free
+        let used = self.used_bitmap.iter().map(|b| b.count_ones()).sum::<u32>() as u16;
+        self.get_capacity() - used
     }
 
     /// Get the virtual address of the next [`SlabPage`]
@@ -1865,7 +1863,7 @@ impl<const N: u16> SlabPage<N> {
     }
 
     fn allocate(&mut self) -> Result<VirtAddr, AllocError> {
-        if self.free == 0 {
+        if self.used_bitmap.iter().all(|b| *b == 0) {
             return Err(AllocError::OutOfMemory);
         }
 
@@ -1875,7 +1873,6 @@ impl<const N: u16> SlabPage<N> {
 
             if self.used_bitmap[idx] & mask == 0 {
                 self.used_bitmap[idx] |= mask;
-                self.free -= 1;
                 return Ok(self.vaddr + ((N * i) as usize));
             }
         }
@@ -1895,7 +1892,6 @@ impl<const N: u16> SlabPage<N> {
         let mask = 1u64 << (i % 64);
 
         self.used_bitmap[idx] &= !mask;
-        self.free += 1;
 
         Ok(())
     }
