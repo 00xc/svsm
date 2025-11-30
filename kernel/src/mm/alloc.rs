@@ -16,6 +16,7 @@ use crate::utils::tcb_ptr::{ptr_read, ptr_write};
 use crate::utils::{align_down, align_up, zero_mem_region};
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::size_of;
+use core::ptr::NonNull;
 use core::{cmp, ptr, slice};
 
 #[cfg(any(test, fuzzing))]
@@ -1802,8 +1803,15 @@ struct SlabPage<const N: u16> {
     vaddr: VirtAddr,
     free: u16,
     used_bitmap: [u64; 2],
-    next_page: VirtAddr,
+    next_page: Option<NonNull<Self>>,
 }
+
+// SAFETY: the only non-Send field is next_page, which is a pointer that
+// we only use internally. SlabPage has no interior mutability.
+unsafe impl<const N: u16> Send for SlabPage<N> {}
+// SAFETY: the only non-Sync field is next_page, which is a pointer that
+// we only use internally. SlabPage has no interior mutability.
+unsafe impl<const N: u16> Sync for SlabPage<N> {}
 
 impl<const N: u16> SlabPage<N> {
     /// Creates a new [`SlabPage`] instance with default values.
@@ -1813,7 +1821,7 @@ impl<const N: u16> SlabPage<N> {
             vaddr: VirtAddr::null(),
             free: 0,
             used_bitmap: [0; 2],
-            next_page: VirtAddr::null(),
+            next_page: None,
         }
     }
 
@@ -1848,11 +1856,11 @@ impl<const N: u16> SlabPage<N> {
     }
 
     /// Get the virtual address of the next [`SlabPage`]
-    fn get_next_page(&self) -> VirtAddr {
+    const fn get_next_page(&self) -> Option<NonNull<Self>> {
         self.next_page
     }
 
-    fn set_next_page(&mut self, next_page: VirtAddr) {
+    const fn set_next_page(&mut self, next_page: Option<NonNull<Self>>) {
         self.next_page = next_page;
     }
 
@@ -1933,8 +1941,7 @@ impl<const N: u16> SlabCommon<N> {
         let old_next_page = self.page.get_next_page();
         new_page.set_next_page(old_next_page);
 
-        self.page
-            .set_next_page(VirtAddr::from(new_page as *mut SlabPage<N>));
+        self.page.set_next_page(Some(new_page.into()));
 
         let capacity = new_page.get_capacity() as u32;
         self.pages += 1;
@@ -1997,7 +2004,7 @@ impl<const N: u16> SlabCommon<N> {
             // Therefore next_page on the last page is never dereferenced.
             // When next_page is set it is guaranteed to point to another
             // SlabCommon page, see Self::add_slab_page().
-            page = unsafe { next_page.aligned_mut().expect("Invalid next page") };
+            page = unsafe { next_page.expect("Invalid next page").as_mut() };
         }
     }
 
@@ -2029,7 +2036,7 @@ impl<const N: u16> SlabCommon<N> {
             // SAFETY: Safe because the virtual address to deallocate will be
             // found before the end of the list is reached. Therefore next_page
             // is always valid.
-            page = unsafe { next_page.aligned_mut().expect("Invalid next page") };
+            page = unsafe { next_page.expect("Invalid next page").as_mut() };
         }
     }
 
@@ -2045,8 +2052,8 @@ impl<const N: u16> SlabCommon<N> {
             // valid Slab Page.
             let slab_page = unsafe {
                 next_page_vaddr
-                    .aligned_mut::<SlabPage<N>>()
                     .expect("couldn't find page to free")
+                    .as_mut()
             };
             next_page_vaddr = slab_page.get_next_page();
 
