@@ -1863,18 +1863,21 @@ impl<const N: u16> SlabPage<N> {
     }
 
     fn allocate(&mut self) -> Result<VirtAddr, AllocError> {
-        if self.used_bitmap.iter().all(|b| *b == 0) {
-            return Err(AllocError::OutOfMemory);
-        }
-
-        for i in 0..self.get_capacity() {
-            let idx = (i / 64) as usize;
-            let mask = 1u64 << (i % 64);
-
-            if self.used_bitmap[idx] & mask == 0 {
-                self.used_bitmap[idx] |= mask;
-                return Ok(self.vaddr + ((N * i) as usize));
+        let cap = self.get_capacity() as usize;
+        // Find the lowest 0 bit and set it to 1. Then use that bit's index
+        // to get the address of the chunk.
+        for (i, slot) in self.used_bitmap.iter_mut().enumerate() {
+            let idx = slot.trailing_ones();
+            if idx == u64::BITS {
+                continue;
             }
+            let abs_idx = (i * u64::BITS as usize) + idx as usize;
+            if abs_idx >= cap {
+                break;
+            }
+            *slot |= 1 << idx;
+
+            return Ok(self.vaddr + (abs_idx * N as usize));
         }
 
         Err(AllocError::OutOfMemory)
