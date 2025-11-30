@@ -1943,6 +1943,32 @@ impl<const N: u16> SlabCommon<N> {
         self.free += capacity;
     }
 
+    /// Allocates a slot for a slab page of the given chunk size `S`.
+    fn allocate_page_slot<const S: u16>(&mut self) -> *mut SlabPage<S> {
+        const { assert!(size_of::<SlabPage<S>>() <= N as usize) };
+        let ptr = self.allocate_slot().as_mut_ptr::<SlabPage<S>>();
+        unsafe { ptr.write(SlabPage::new()) }
+        ptr
+    }
+
+    /// Deallocates a slot for a slab page of the given chunk size `S`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must make sure that the passed pointer was allocated from this
+    /// same `SlabCommon` and that it was done through
+    /// [`allocate_page_slot()`](Self::allocate_page_slot).
+    unsafe fn deallocate_page_slot<const S: u16>(&mut self, ptr: *mut SlabPage<S>) {
+        const { assert!(size_of::<SlabPage<S>>() <= N as usize) };
+        // SAFETY: the caller must make sure to pass a pointer that was
+        // previously allocated with allocate_page_slot(). This ensures
+        // that the pointer is valid and contains initialized memory.
+        unsafe {
+            (*ptr).destroy();
+            self.deallocate_slot(VirtAddr::from(ptr))
+        };
+    }
+
     /// Allocate other slot, caller must make sure there's at least one
     /// free slot
     fn allocate_slot(&mut self) -> VirtAddr {
@@ -2039,8 +2065,6 @@ impl<const N: u16> SlabCommon<N> {
 
             last_page.set_next_page(slab_page.get_next_page());
 
-            slab_page.destroy();
-
             return slab_page;
         }
     }
@@ -2081,17 +2105,16 @@ impl SlabPageSlab {
         }
         assert_ne!(self.common.free, 0);
 
-        let page_vaddr = self.common.allocate_slot();
+        let page_ptr = self.common.allocate_page_slot();
         // SAFETY: page_vaddr was just allocated and points to a memory region
         // big enough for any instance of a SlabPage object.
-        let slab_page = unsafe { &mut *page_vaddr.as_mut_ptr::<SlabPage<SLAB_PAGE_SIZE>>() };
+        let slab_page = unsafe { &mut *page_ptr };
 
-        *slab_page = SlabPage::new();
         if let Err(e) = slab_page.init() {
             // SAFETY: Safe as page_vaddr has been allocated above from the
             // same Slab.
             unsafe {
-                self.common.deallocate_slot(page_vaddr);
+                self.common.deallocate_page_slot(page_ptr);
             }
             return Err(e);
         }
@@ -2106,10 +2129,10 @@ impl SlabPageSlab {
         // The SlabPageSlab uses SlabPages on its own and freeing a SlabPage can empty another SlabPage.
         while self.common.free_pages > 1 {
             let slab_page = self.common.free_one_page();
-            // SAFETY: Safe because free_one_page() returns a virtual address
+            // SAFETY: Safe because free_one_page() returns a pointer
             // of a SlabPage belonging to this Slab.
             unsafe {
-                self.common.deallocate_slot(VirtAddr::from(slab_page));
+                self.common.deallocate_page_slot(slab_page);
             }
         }
     }
@@ -2119,9 +2142,9 @@ impl SlabPageSlab {
     /// # Returns
     ///
     /// Result containing a pointer to the allocated [`SlabPage`] or an `AllocError`.
-    fn allocate(&mut self) -> Result<*mut SlabPage<SLAB_PAGE_SIZE>, AllocError> {
+    fn allocate<const S: u16>(&mut self) -> Result<*mut SlabPage<S>, AllocError> {
         self.grow_slab()?;
-        Ok(self.common.allocate_slot().as_mut_ptr())
+        Ok(self.common.allocate_page_slot())
     }
 
     /// Deallocates a slab page, freeing the associated memory.
@@ -2134,11 +2157,11 @@ impl SlabPageSlab {
     ///
     /// Caller must ensure that `slab_page` points to a SlabPage object
     /// allocated from the SlabPageSlab.
-    unsafe fn deallocate(&mut self, slab_page: *mut SlabPage<SLAB_PAGE_SIZE>) {
+    unsafe fn deallocate<const S: u16>(&mut self, slab_page: *mut SlabPage<S>) {
         // SAFETY: Safe as long as caller supplied a valid pointer to a
         // SlabPageSlab object.
         unsafe {
-            self.common.deallocate_slot(VirtAddr::from(slab_page));
+            self.common.deallocate_page_slot(slab_page);
         }
         self.shrink_slab();
     }
@@ -2171,18 +2194,14 @@ impl<const N: u16> Slab<N> {
             return Ok(());
         }
 
-        let slab_page_ptr = SLAB_PAGE_SLAB.lock().allocate()?;
-        let page_ptr = slab_page_ptr.cast::<SlabPage<N>>();
-        // SAFETY: The write is safe because SLAB_PAGE_SLAB allocations return
-        // a pointer to a memory area big enough to contain a SlabPage.
-        unsafe { page_ptr.write(SlabPage::<N>::new()) };
+        let page_ptr = SLAB_PAGE_SLAB.lock().allocate()?;
         // SAFETY: page_ptr is safe to dereference, see above.
         let page = unsafe { &mut *page_ptr };
         if let Err(e) = page.init() {
             // SAFETY: Error path, the ptr deallocated here was allocated above
             // from SLAB_PAGE_CACHE.
             unsafe {
-                SLAB_PAGE_SLAB.lock().deallocate(slab_page_ptr);
+                SLAB_PAGE_SLAB.lock().deallocate(page_ptr);
             }
             return Err(e);
         }
@@ -2200,7 +2219,7 @@ impl<const N: u16> Slab<N> {
         // SAFETY: free_one_page() returns a valid slab_page allocated via
         // SLAB_PAGE_SLAB.
         unsafe {
-            SLAB_PAGE_SLAB.lock().deallocate(slab_page.cast());
+            SLAB_PAGE_SLAB.lock().deallocate(slab_page);
         }
     }
 
