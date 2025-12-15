@@ -15,10 +15,11 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
+use zerocopy::{FromBytes, IntoBytes};
 
 pub const VMPCK_SIZE: usize = 32;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, FromBytes, IntoBytes)]
 #[repr(C, packed)]
 pub struct SecretsPage {
     version: u32,

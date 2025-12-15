@@ -23,8 +23,9 @@ use crate::error::SvsmError;
 use crate::greq::driver::guest_request_driver_init;
 use crate::hyperv;
 use crate::io::IOPort;
+use crate::mm::access::LocalMapping;
 use crate::mm::memory::write_guest_memory_map;
-use crate::mm::{PerCPUPageMappingGuard, PAGE_SIZE, PAGE_SIZE_2M};
+use crate::mm::{PAGE_SIZE, PAGE_SIZE_2M};
 use crate::sev::ghcb::GHCBIOSize;
 use crate::sev::hv_doorbell::HVDoorbell;
 use crate::sev::msr_protocol::{
@@ -74,11 +75,12 @@ unsafe fn pvalidate_page_range(
         } else {
             PAGE_SIZE
         };
-        let mapping = PerCPUPageMappingGuard::create(paddr, paddr + len, 0)?;
+        // SAFETY: the caller must uphold the safety requirements.
+        let mapping = unsafe { LocalMapping::<[u8]>::map(paddr, len) }?;
         // SAFETY: The mapping correctly represents the physical address range
         // and therefore is safe with respect to other memory operations.
         unsafe {
-            pvalidate_range(MemoryRegion::new(mapping.virt_addr(), len), op)?;
+            pvalidate_range(mapping.mapping_vregion(), op)?;
         }
         paddr = paddr + len;
     }

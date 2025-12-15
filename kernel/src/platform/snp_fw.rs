@@ -11,12 +11,13 @@ use crate::config::SvsmConfig;
 use crate::cpu::cpuid::copy_cpuid_table_to;
 use crate::cpu::percpu::{current_ghcb, this_cpu, this_cpu_shared};
 use crate::error::SvsmError;
-use crate::mm::PerCPUPageMappingGuard;
+use crate::mm::access::{BorrowMapping, LocalMapping, WriteableMapping};
 use crate::platform::PageStateChangeOp;
-use crate::sev::{pvalidate, rmp_adjust, secrets_page, PvalidateOp, RMPFlags};
+use crate::sev::{pvalidate, rmp_adjust, secrets_page, PvalidateOp, RMPFlags, SecretsPage};
 use crate::types::{PageSize, GUEST_VMPL, PAGE_SIZE};
-use crate::utils::{zero_mem_region, MemoryRegion};
+use crate::utils::MemoryRegion;
 use alloc::vec::Vec;
+use cpuarch::snp_cpuid::SnpCpuidTable;
 
 #[derive(Clone, Debug, Default)]
 pub struct SevFWMetaData {
@@ -61,8 +62,10 @@ unsafe fn validate_fw_mem_region(
     }
 
     for paddr in region.iter_pages(PageSize::Regular) {
-        let guard = PerCPUPageMappingGuard::create_4k(paddr)?;
-        let vaddr = guard.virt_addr();
+        // SAFETY: the caller must uphold the safety requirements for the
+        // physical memory region.
+        let mut guard = unsafe { LocalMapping::<[u8]>::map(paddr, PAGE_SIZE) }?;
+        let vaddr = guard.mapping_vregion().start();
 
         // SAFETY: the virtual address mapping is known to point to the guest
         // physical address range supplied by the caller.
@@ -76,7 +79,7 @@ unsafe fn validate_fw_mem_region(
                 PageSize::Regular,
             )?;
 
-            zero_mem_region(vaddr, vaddr + PAGE_SIZE);
+            guard.fill(0)?;
         }
     }
 
@@ -178,13 +181,9 @@ pub fn print_fw_meta(fw_meta: &SevFWMetaData) {
 /// The caller must ensure that the given physical address is valid and writing
 /// to it does not violate Rust's memory model.
 unsafe fn copy_cpuid_table_to_fw(fw_addr: PhysAddr) -> Result<(), SvsmError> {
-    let guard = PerCPUPageMappingGuard::create_4k(fw_addr)?;
-
-    // SAFETY: the caller must uphold the safety requirements.
-    unsafe {
-        copy_cpuid_table_to(guard.virt_addr());
-    }
-
+    // SAFETY: the caller must uphold safety requirements
+    let mapping = unsafe { LocalMapping::<SnpCpuidTable>::map(fw_addr) }?;
+    copy_cpuid_table_to(mapping)?;
     Ok(())
 }
 
@@ -197,15 +196,9 @@ unsafe fn copy_secrets_page_to_fw(
     caa_addr: PhysAddr,
     kernel_region: &MemoryRegion<PhysAddr>,
 ) -> Result<(), SvsmError> {
-    let guard = PerCPUPageMappingGuard::create_4k(fw_addr)?;
-    let start = guard.virt_addr();
-
-    // Zero target
-    // SAFETY: we trust PerCPUPageMappingGuard::create_4k() to return a
-    // valid pointer to a correctly mapped region of size PAGE_SIZE.
-    unsafe {
-        zero_mem_region(start, start + PAGE_SIZE);
-    }
+    // SAFETY: the caller must uphold the safety requirements
+    let mut page = unsafe { LocalMapping::<SecretsPage>::map(fw_addr) }?;
+    page.borrow_slice_at::<u8>(0, PAGE_SIZE)?.fill(0)?;
 
     // Copy secrets page
     let mut fw_secrets_page = secrets_page().unwrap().copy_for_vmpl(GUEST_VMPL);
@@ -216,12 +209,7 @@ unsafe fn copy_secrets_page_to_fw(
         u64::from(caa_addr),
     );
 
-    // SAFETY: start points to a new allocated and zeroed page.
-    unsafe {
-        fw_secrets_page.copy_to(start);
-    }
-
-    Ok(())
+    page.write(fw_secrets_page)
 }
 
 /// # Safety
@@ -229,15 +217,8 @@ unsafe fn copy_secrets_page_to_fw(
 /// The caller must ensure that the given physical address is valid and writing
 /// to it does not violate Rust's memory model.
 unsafe fn zero_caa_page(fw_addr: PhysAddr) -> Result<(), SvsmError> {
-    let guard = PerCPUPageMappingGuard::create_4k(fw_addr)?;
-    let vaddr = guard.virt_addr();
-
-    // SAFETY: we trust PerCPUPageMappingGuard::create_4k() to return a
-    // valid pointer to a correctly mapped region of size PAGE_SIZE.
-    unsafe {
-        zero_mem_region(vaddr, vaddr + PAGE_SIZE);
-    }
-
+    // SAFETY: caller must ensure that the given address is valid
+    unsafe { LocalMapping::<[u8]>::map(fw_addr, PAGE_SIZE) }?.fill(0)?;
     Ok(())
 }
 
@@ -285,8 +266,9 @@ pub unsafe fn validate_fw(
         );
 
         for paddr in region.iter_pages(PageSize::Regular) {
-            let guard = PerCPUPageMappingGuard::create_4k(paddr)?;
-            let vaddr = guard.virt_addr();
+            // SAFETY: the caller must uphold the safety requirements
+            let guard = unsafe { LocalMapping::<[u8]>::map(paddr, PAGE_SIZE) }?;
+            let vaddr = guard.mapping_vregion().start();
             // SAFETY: the address is known to be a guest page.
             if let Err(e) = unsafe {
                 rmp_adjust(
