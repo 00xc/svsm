@@ -9,9 +9,11 @@ use crate::cpu::flush_tlb_global_sync;
 use crate::cpu::percpu::{this_cpu, this_cpu_shared, PERCPU_AREAS, PERCPU_VMSAS};
 use crate::error::SvsmError;
 use crate::locking::RWLock;
-use crate::mm::virtualrange::{VIRT_ALIGN_2M, VIRT_ALIGN_4K};
-use crate::mm::{valid_phys_address, writable_phys_addr, GuestPtr};
-use crate::mm::{PerCPUMapping, PerCPUPageMappingGuard};
+use crate::mm::access::{
+    BorrowMapping, GuestMapping, ReadableMapping, ReadableSliceMapping, WriteableMapping,
+};
+use crate::mm::PerCPUMapping;
+use crate::mm::{valid_phys_address, writable_phys_addr};
 use crate::protocols::apic::{APIC_PROTOCOL_VERSION_MAX, APIC_PROTOCOL_VERSION_MIN};
 use crate::protocols::attest::{ATTEST_PROTOCOL_VERSION_MAX, ATTEST_PROTOCOL_VERSION_MIN};
 use crate::protocols::errors::SvsmReqError;
@@ -25,7 +27,6 @@ use crate::sev::utils::{
 };
 use crate::sev::vmsa::VMSAControl;
 use crate::types::{PageSize, PAGE_SIZE, PAGE_SIZE_2M};
-use crate::utils::zero_mem_region;
 use cpuarch::vmsa::VMSA;
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -50,7 +51,7 @@ pub const CORE_PROTOCOL_VERSION_MAX: u32 = 1;
 // the lock for write.
 static PVALIDATE_LOCK: RWLock<()> = RWLock::new(());
 
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Copy, Clone, FromBytes, IntoBytes)]
 struct PValidateRequest {
     entries: u16,
@@ -271,9 +272,9 @@ fn core_configure_vtom(params: &mut RequestParams) -> Result<(), SvsmReqError> {
 }
 
 fn core_pvalidate_one(entry: u64, flush: &mut bool) -> Result<(), SvsmReqError> {
-    let (page_size_bytes, valign, huge) = match entry & 3 {
-        0 => (PAGE_SIZE, VIRT_ALIGN_4K, PageSize::Regular),
-        1 => (PAGE_SIZE_2M, VIRT_ALIGN_2M, PageSize::Huge),
+    let (page_size_bytes, huge) = match entry & 3 {
+        0 => (PAGE_SIZE, PageSize::Regular),
+        1 => (PAGE_SIZE_2M, PageSize::Huge),
         _ => return Err(SvsmReqError::invalid_parameter()),
     };
 
@@ -289,13 +290,10 @@ fn core_pvalidate_one(entry: u64, flush: &mut bool) -> Result<(), SvsmReqError> 
         return Err(SvsmReqError::invalid_parameter());
     }
 
-    if !valid_phys_address(paddr) {
-        log::debug!("Invalid phys address: {:#x}", paddr);
-        return Err(SvsmReqError::invalid_address());
-    }
-
-    let guard = PerCPUPageMappingGuard::create(paddr, paddr + page_size_bytes, valign)?;
-    let vaddr = guard.virt_addr();
+    // map() checks that the provided address belongs to the guest
+    let mut mapping = GuestMapping::<[u8]>::map(paddr, page_size_bytes)
+        .map_err(|_| SvsmReqError::invalid_address())?;
+    let vaddr = mapping.mapping_vregion().start();
 
     // Take lock to prevent races with CREATE_VCPU calls
     let lock = PVALIDATE_LOCK.lock_read();
@@ -347,9 +345,7 @@ fn core_pvalidate_one(entry: u64, flush: &mut bool) -> Result<(), SvsmReqError> 
             // we trust PerCPUPageMappingGuard::create() to return a valid
             // vaddr pointing to a mapped region of at least page_size_bytes
             // size.
-            unsafe {
-                zero_mem_region(vaddr, vaddr + page_size_bytes);
-            }
+            mapping.fill(0)?;
         } else {
             log::warn!("Not clearing possible read-only page at PA {:#x}", paddr);
         }
@@ -370,39 +366,26 @@ fn core_pvalidate(params: &RequestParams) -> Result<(), SvsmReqError> {
         return Err(SvsmReqError::invalid_parameter());
     }
 
-    let paddr = gpa.page_align();
-    let offset = gpa.page_offset();
+    let guard = GuestMapping::<[u8]>::map(gpa, PAGE_SIZE - gpa.page_offset())?;
+    let mut req_guard = guard.borrow::<PValidateRequest>()?;
 
-    let guard = PerCPUPageMappingGuard::create_4k(paddr)?;
-    let start = guard.virt_addr();
+    let mut request = req_guard.read()?;
+    let num_entries = request.entries as usize;
+    let next = request.next as usize;
 
-    let guest_page = GuestPtr::<PValidateRequest>::new(start + offset);
-    // SAFETY: start is a new mapped page address, thus valid.
-    // offset can't exceed a page size, so guest_page belongs to mapped memory.
-    let mut request = unsafe { guest_page.read()? };
-
-    let entries = request.entries;
-    let next = request.next;
-
-    let max_entries: u16 = ((PAGE_SIZE - offset - size_of::<PValidateRequest>())
-        / size_of::<u64>())
-    .try_into()
-    .unwrap();
-
-    if entries == 0 || entries > max_entries || entries <= next {
+    if num_entries == 0 || num_entries <= next {
         return Err(SvsmReqError::invalid_parameter());
     }
 
+    // If num_entries overflows the page the borrow method will return an error.
+    let entries = guard
+        .borrow_slice_at::<u64>(size_of::<PValidateRequest>(), num_entries)
+        .map_err(|_| SvsmReqError::invalid_parameter())?;
+
     let mut loop_result = Ok(());
     let mut flush = false;
-
-    let guest_entries = guest_page.offset(1).cast::<u64>();
-    for i in next..entries {
-        let index = i as isize;
-        // SAFETY: guest_entries comes from guest_page which is a new mapped
-        // page. index is between [next, entries) and both values have been
-        // validated.
-        let entry = match unsafe { guest_entries.offset(index).read() } {
+    for i in next..guard.len() {
+        let entry = match entries.read_item(i) {
             Ok(v) => v,
             Err(e) => {
                 loop_result = Err(e.into());
@@ -418,11 +401,7 @@ fn core_pvalidate(params: &RequestParams) -> Result<(), SvsmReqError> {
         }
     }
 
-    // SAFETY: guest_page is obtained from a guest-provided physical address
-    // (untrusted), so it needs to be valid (ie. belongs to the guest and only
-    // the guest). The physical address is validated by valid_phys_address()
-    // called at the beginning of SVSM_CORE_PVALIDATE handler (this one).
-    if let Err(e) = unsafe { guest_page.write_ref(&request) } {
+    if let Err(e) = req_guard.write(request) {
         loop_result = Err(e.into());
     }
 
@@ -436,20 +415,12 @@ fn core_pvalidate(params: &RequestParams) -> Result<(), SvsmReqError> {
 fn core_remap_ca(params: &RequestParams) -> Result<(), SvsmReqError> {
     let gpa = PhysAddr::from(params.rcx);
 
-    if !gpa.is_aligned(8) || !valid_phys_address(gpa) || gpa.crosses_page(8) {
+    if !gpa.is_aligned(8) || gpa.crosses_page(8) {
         return Err(SvsmReqError::invalid_parameter());
     }
 
-    let offset = gpa.page_offset();
-    let paddr = gpa.page_align();
-
-    // Temporarily map new CAA to clear it
-    let mapping_guard = PerCPUPageMappingGuard::create_4k(paddr)?;
-    let vaddr = mapping_guard.virt_addr() + offset;
-
-    let pending = GuestPtr::<SvsmCaa>::new(vaddr);
-    // SAFETY: pending points to a new allocated page
-    unsafe { pending.write(SvsmCaa::zeroed())? };
+    let mut guard = GuestMapping::<SvsmCaa>::map(gpa)?;
+    guard.write(SvsmCaa::zeroed())?;
 
     // Clear any pending interrupt state before remapping the calling area to
     // ensure that any pending lazy EOI has been processed.
