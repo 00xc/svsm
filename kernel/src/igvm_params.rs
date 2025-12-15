@@ -190,34 +190,62 @@ impl IgvmParams<'_> {
             mem_map_region.len(),
         );
 
+        // Calculate the maximum number of entries that can be inserted.
+        let max_entries = fw_info.memory_map_size as usize / size_of::<IGVM_VHS_MEMORY_MAP_ENTRY>();
+
         let mem_map_mapping =
             PerCPUPageMappingGuard::create(mem_map_region.start(), mem_map_region.end(), 0)?;
         let mem_map_va = mem_map_mapping.virt_addr();
 
-        if self.igvm_param_block.firmware.memory_map_prevalidated == 0 {
-            // The guest expects the pages in the memory map to be treated like
-            // host-provided IGVM parameters, which requires the pages to be
-            // validated.  Since the memory was not declared as part of the
-            // guest firmware image, the pages must be validated here.
-            if self.page_state_change_required() {
-                SVSM_PLATFORM.page_state_change(
-                    mem_map_region,
-                    PageSize::Regular,
-                    PageStateChangeOp::Private,
-                )?;
-            }
+        self.validate_memory_map(mem_map_va, mem_map_region)?;
 
-            let mem_map_va_region = MemoryRegion::new(mem_map_va, mem_map_region.len());
-            // SAFETY: the virtual address region was created above to map the
-            // specified physical address range and is therefore safe.
-            unsafe {
-                SVSM_PLATFORM
-                    .validate_virtual_page_range(mem_map_va_region, PageValidateOp::Validate)?;
-            }
+        // Generate a guest pointer range to hold the memory map and write to it.
+        let mem_map = GuestPtr::new(mem_map_va);
+        self.write_guest_memory_map_entries(mem_map, map, max_entries)?;
+
+        Ok(())
+    }
+
+    /// Validate the memory map, if not already validated as part of the guest
+    /// image.
+    fn validate_memory_map(
+        &self,
+        vstart: VirtAddr,
+        pregion: MemoryRegion<PhysAddr>,
+    ) -> Result<(), SvsmError> {
+        if self.igvm_param_block.firmware.memory_map_prevalidated != 0 {
+            return Ok(());
         }
 
-        // Calculate the maximum number of entries that can be inserted.
-        let max_entries = fw_info.memory_map_size as usize / size_of::<IGVM_VHS_MEMORY_MAP_ENTRY>();
+        // The guest expects the pages in the memory map to be treated like
+        // host-provided IGVM parameters, which requires the pages to be
+        // validated.  Since the memory was not declared as part of the
+        // guest firmware image, the pages must be validated here.
+        if self.page_state_change_required() {
+            SVSM_PLATFORM.page_state_change(
+                pregion,
+                PageSize::Regular,
+                PageStateChangeOp::Private,
+            )?;
+        }
+
+        let mem_map_va_region = MemoryRegion::new(vstart, pregion.len());
+        // SAFETY: the virtual address region was created above to map the
+        // specified physical address range and is therefore safe.
+        unsafe {
+            SVSM_PLATFORM
+                .validate_virtual_page_range(mem_map_va_region, PageValidateOp::Validate)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the memory map to the specified location in guest address space.
+    fn write_guest_memory_map_entries(
+        &self,
+        mem_map: GuestPtr<IGVM_VHS_MEMORY_MAP_ENTRY>,
+        map: &[MemoryRegion<PhysAddr>],
+        max_entries: usize,
+    ) -> Result<(), SvsmError> {
         // Return an error if an overflow occurs.
         if map.len() > max_entries {
             log::warn!(
@@ -227,9 +255,6 @@ impl IgvmParams<'_> {
             );
             return Err(SvsmError::Firmware);
         }
-
-        // Generate a guest pointer range to hold the memory map.
-        let mem_map = GuestPtr::new(mem_map_va);
 
         for (i, entry) in map.iter().enumerate() {
             // SAFETY: mem_map_va points to newly mapped memory, whose physical
@@ -264,7 +289,6 @@ impl IgvmParams<'_> {
                     })?;
             }
         }
-
         Ok(())
     }
 
