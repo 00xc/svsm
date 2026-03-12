@@ -2,7 +2,7 @@ name: PublishDocs
 on:
   push:
     branches:
-      - main
+      - main2
 permissions:
   contents: write
 jobs:
