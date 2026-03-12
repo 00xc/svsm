@@ -72,7 +72,7 @@ aes-gcm = { version = "0.10.3", default-features = false }
 aes-kw = { version = "0.2.1", default-features = false }
 arbitrary = "1.3.0"
 base64 = { version = "0.22.1", default-features = false }
-bitfield-struct = "0.6.2"
+bitfield-struct = "0.10.1"
 bitflags = "2.6"
 clap = { version = "4.4.14", default-features = false }
 cocoon-tpm-crypto = { version = "0.1.0", default-features = false }

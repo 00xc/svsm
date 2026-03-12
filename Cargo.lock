@@ -187,17 +187,6 @@ dependencies = [
 
 [[package]]
 name = "bitfield-struct"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adc0846593a56638b74e136a45610f9934c052e14761bebca6b092d5522599e3"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "bitfield-struct"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2be5a46ba01b60005ae2c51a36a29cfe134bcacae2dd5cedcd4615fbaad1494b"
@@ -287,7 +276,7 @@ dependencies = [
 name = "cbit"
 version = "0.1.0"
 dependencies = [
- "bitfield-struct 0.6.2",
+ "bitfield-struct",
 ]
 
 [[package]]
@@ -492,7 +481,7 @@ dependencies = [
 name = "cpuarch"
 version = "0.1.0"
 dependencies = [
- "bitfield-struct 0.6.2",
+ "bitfield-struct",
  "zerocopy",
 ]
 
@@ -1065,7 +1054,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67578b05ebcdfa1aa0fe13f77a13bdd7d87036128898a327f1bf8e7356cf09cd"
 dependencies = [
- "bitfield-struct 0.10.1",
+ "bitfield-struct",
  "crc32fast",
  "hex",
  "igvm_defs",
@@ -1083,7 +1072,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eedd8c64460676101062f9f2ecdeb52d8f43e622da6a6c5bf5158f4ef08b0906"
 dependencies = [
- "bitfield-struct 0.10.1",
+ "bitfield-struct",
  "open-enum",
  "static_assertions",
  "zerocopy",
@@ -1887,7 +1876,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "aes-kw",
- "bitfield-struct 0.6.2",
+ "bitfield-struct",
  "bitflags 2.10.0",
  "bootdefs",
  "bootimg",
