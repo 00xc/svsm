@@ -69,9 +69,6 @@ jobs:
       - name: Install rust toolchain
         run: rustup toolchain install --profile minimal
 
-      - name: Add rust components
-        run: rustup component add rust-src
-
       - name: Install TPM 2.0 Reference Implementation build dependencies
         run: sudo apt install -y build-essential cmake pkg-config
 
@@ -95,9 +92,6 @@ jobs:
 
       - name: Install rust toolchain
         run: rustup toolchain install --profile minimal
-
-      - name: Add rust components
-        run: rustup component add rust-src
 
       - name: Install TPM 2.0 Reference Implementation build dependencies
         run: sudo apt install -y build-essential cmake pkg-config
