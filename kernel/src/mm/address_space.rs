@@ -259,6 +259,13 @@ const _: () = assert!(PGTABLE_LVL3_IDX_PTE_SELFMAP == bootimg::PGTABLE_LVL3_IDX_
 
 pub const SVSM_PTE_BASE: VirtAddr = virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP);
 
+#[cfg(test)]
+pub const PGTABLE_LVL3_IDX_TEST: usize = 470;
+#[cfg(test)]
+pub const SVSM_TEST_START: VirtAddr = virt_from_idx(PGTABLE_LVL3_IDX_TEST);
+#[cfg(test)]
+pub const SVSM_TEST_END: VirtAddr = SVSM_TEST_START.const_add(SIZE_LEVEL3);
+
 //
 // User-space mapping constants
 //

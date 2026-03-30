@@ -546,12 +546,22 @@ fn svsm_init(launch_info: &KernelLaunchInfo) {
 
     #[cfg(test)]
     {
+        use svsm::cpu::idt::svsm::TEST_VMR;
+        use svsm::mm::pagetable::PTEntryFlags;
+        use svsm::mm::vm::VMR;
+        use svsm::mm::{SVSM_TEST_END, SVSM_TEST_START};
+
         if boot_params.has_qemu_testdev() {
             crate::testutils::set_has_qemu_testdev();
         }
         if boot_params.has_test_iorequests() {
             crate::testutils::set_has_test_iorequests();
         }
+
+        let vmr = VMR::new(SVSM_TEST_START, SVSM_TEST_END, PTEntryFlags::GLOBAL).unwrap();
+        unsafe { vmr.initialize_lazy().unwrap() };
+        TEST_VMR.init(vmr).unwrap();
+
         let _ = start_kernel_task(
             KernelThreadStartInfo::new(test_in_svsm_task, 0),
             String::from("SVSM test task"),

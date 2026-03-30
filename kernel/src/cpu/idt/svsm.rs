@@ -26,6 +26,8 @@ use crate::debug::gdbstub::svsm_gdbstub::handle_debug_exception;
 use crate::error::SvsmError;
 use crate::mm::GuestPtr;
 use crate::mm::PAGE_SIZE;
+#[cfg(test)]
+use crate::mm::vm::VMR;
 use crate::platform::PageValidateOp;
 use crate::platform::SvsmPlatform;
 use crate::task::{is_task_fault, terminate};
@@ -267,6 +269,10 @@ extern "C" fn ex_handler_page_fault_early(ctxt: &mut X86ExceptionContext, _vecto
     }
 }
 
+/// Testing #PF hook
+#[cfg(test)]
+pub static TEST_VMR: ImmutAfterInitCell<VMR> = ImmutAfterInitCell::uninit();
+
 // Page-Fault handler
 #[unsafe(no_mangle)]
 extern "C" fn ex_handler_page_fault(ctxt: &mut X86ExceptionContext, vector: usize) {
@@ -298,6 +304,15 @@ extern "C" fn ex_handler_page_fault(ctxt: &mut X86ExceptionContext, vector: usiz
 
     if handle_exception_table(ctxt) {
         return;
+    }
+
+    #[cfg(test)]
+    if let Ok(vmr) = TEST_VMR.try_get_inner() {
+        let task = this_cpu().current_task();
+        let mut pgtbl = task.page_table.lock();
+        if vmr.handle_page_fault(&mut pgtbl, vaddr, is_write).is_ok() {
+            return;
+        }
     }
 
     handle_debug_exception(ctxt, vector);
