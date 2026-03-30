@@ -508,8 +508,16 @@ impl VMR {
             return Err(SvsmError::Mem);
         }
 
+        // Ask the backing mapping for a resolution
         let off = vaddr - start;
-        node.get_mapping().handle_page_fault(self, off, write)?;
+        let mapping = node.get_mapping();
+        let res = mapping.handle_page_fault(self, off, write)?;
+        let flags = self.pt_flags | res.flags | PTEntryFlags::PRESENT;
+        let shared = mapping.shared();
+        match mapping.page_size() {
+            PageSize::Regular => pgtable.map_4k(start + off, res.paddr, flags, shared)?,
+            PageSize::Huge => pgtable.map_2m(start + off, res.paddr, flags, shared)?,
+        }
         Ok(())
     }
 }
