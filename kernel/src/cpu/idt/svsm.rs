@@ -274,12 +274,11 @@ extern "C" fn ex_handler_page_fault(ctxt: &mut X86ExceptionContext, vector: usiz
     let rip = ctxt.frame.rip;
     let err = ctxt.error_code;
     let vaddr = VirtAddr::from(cr2);
+    let is_write = PageFaultError::from_bits_truncate(err as u32).contains(PageFaultError::W);
 
     if user_mode(ctxt) {
         let kill_task: bool = if is_task_fault(vaddr) {
-            current_task()
-                .fault(vaddr, (err & PageFaultError::W.bits() as usize) != 0)
-                .is_err()
+            current_task().fault(vaddr, is_write).is_err()
         } else {
             true
         };
@@ -290,20 +289,22 @@ extern "C" fn ex_handler_page_fault(ctxt: &mut X86ExceptionContext, vector: usiz
             );
             terminate();
         }
-    } else if this_cpu()
-        .handle_pf(
-            VirtAddr::from(cr2),
-            (err & PageFaultError::W.bits() as usize) != 0,
-        )
-        .is_err()
-        && !handle_exception_table(ctxt)
-    {
-        handle_debug_exception(ctxt, vector);
-        panic!(
-            "Unhandled Page-Fault at RIP {:#018x} CR2: {:#018x} error code: {:#018x}",
-            rip, cr2, err
-        );
+        return;
     }
+
+    if this_cpu().handle_pf(vaddr, is_write).is_ok() {
+        return;
+    }
+
+    if handle_exception_table(ctxt) {
+        return;
+    }
+
+    handle_debug_exception(ctxt, vector);
+    panic!(
+        "Unhandled Page-Fault at RIP {:#018x} CR2: {:#018x} error code: {:#018x}",
+        rip, cr2, err
+    );
 }
 
 // Control-Protection handler
