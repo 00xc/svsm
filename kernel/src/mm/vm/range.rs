@@ -546,3 +546,128 @@ impl Drop for VMRMapping<'_> {
             .expect("Error removing VRMapping virtual memory range");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use super::*;
+    use crate::{
+        address::PhysAddr,
+        cpu::idt::svsm::TEST_VMR,
+        mm::{
+            PageBox, virt_to_phys,
+            vm::{VirtualMapping, mapping::VMPageFaultResolution},
+        },
+        utils::page_offset,
+    };
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct TestMapping {
+        /// 2 pages, 1 read-only, 1 read-write
+        pages: [PageBox<[u8; PAGE_SIZE]>; 2],
+        faults: AtomicUsize,
+    }
+
+    impl TestMapping {
+        fn new() -> Result<Self, SvsmError> {
+            let mut p1 = PageBox::<[u8; PAGE_SIZE]>::try_new_zeroed()?;
+            p1.fill(0x41);
+            let mut p2 = PageBox::<[u8; PAGE_SIZE]>::try_new_zeroed()?;
+            p2.fill(0x42);
+            Ok(Self {
+                pages: [p1, p2],
+                faults: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl VirtualMapping for TestMapping {
+        fn mapping_size(&self) -> usize {
+            self.pages.len() << PAGE_SHIFT
+        }
+
+        fn map(&self, offset: usize) -> Option<PhysAddr> {
+            // Get the physical address of the matching page
+            let idx = offset / PAGE_SIZE;
+            let page = self.pages.get(idx)?;
+            let off = page_offset(offset);
+            let paddr = virt_to_phys(page.vaddr()) + off;
+            Some(paddr)
+        }
+
+        fn pt_flags(&self, offset: usize) -> PTEntryFlags {
+            let idx = offset / PAGE_SIZE;
+            // First page should be initially mapped as read-only
+            if idx == 0 {
+                PTEntryFlags::empty()
+            } else {
+                PTEntryFlags::WRITABLE
+            }
+        }
+
+        fn handle_page_fault(
+            &self,
+            _vmr: &VMR,
+            offset: usize,
+            write: bool,
+        ) -> Result<VMPageFaultResolution, SvsmError> {
+            self.faults.fetch_add(1, Ordering::Relaxed);
+            let idx = offset / PAGE_SIZE;
+
+            // We only expect a #PF on a write to the first page.
+            assert!(write);
+            assert_eq!(idx, 0);
+
+            // Ask for the backing page to be mapped as writeable
+            Ok(VMPageFaultResolution {
+                paddr: self.map(offset).unwrap(),
+                flags: PTEntryFlags::WRITABLE,
+            })
+        }
+    }
+
+    #[test]
+    #[cfg_attr(not(test_in_svsm), ignore = "Can only be run inside guest")]
+    fn test_vmr_page_fault() {
+        let mapping = Arc::new(TestMapping::new().unwrap());
+        let guard = VMRMapping::new(&TEST_VMR, mapping.clone()).unwrap();
+        let base = guard.virt_addr();
+
+        // Create a pointer to each of the `TestMapping` pages.
+        let p1 = core::ptr::with_exposed_provenance_mut::<u8>(base.bits());
+        let p2 = core::ptr::with_exposed_provenance_mut::<u8>(base.bits() + PAGE_SIZE);
+
+        // This will trigger a #PF since the page table parts are not yet in the task
+        // page table, but it will not trigger TestMapping::handle_page_fault(),
+        // as it is entirely handled by the `VMR`.
+        // SAFETY: the page is mapped while `guard` is alive
+        let v = unsafe { p1.read_volatile() };
+        assert_eq!(v, 0x41);
+        assert_eq!(mapping.faults.load(Ordering::Relaxed), 0);
+
+        // The second page has write permissions, so this will not trigger #PF.
+        // SAFETY: the page is mapped while `guard` is alive
+        unsafe {
+            p2.write_volatile(0);
+            assert_eq!(p2.read_volatile(), 0);
+            assert_eq!(p2.add(1).read_volatile(), 0x42);
+        };
+        assert_eq!(mapping.faults.load(Ordering::Relaxed), 0);
+
+        // The first page does not have write permissions, so this will trigger a #PF.
+        // `TestMapping` will ask the `VMR` to remap the page with write permissions
+        // so that the test does not panic.
+        // SAFETY: the page is mapped while `guard` is alive
+        unsafe {
+            p1.write_volatile(0);
+            assert_eq!(p1.read_volatile(), 0);
+            assert_eq!(p1.add(1).read_volatile(), 0x41);
+        };
+
+        // Only the last #PF should have reached `TestMapping`.
+        assert_eq!(mapping.faults.load(Ordering::Relaxed), 1);
+    }
+}
