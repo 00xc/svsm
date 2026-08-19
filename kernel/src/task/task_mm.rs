@@ -51,16 +51,20 @@ impl Drop for TaskVirtualRegionGuard {
 }
 
 pub struct TaskMM {
-    /// Virtual address region that has been allocated for this task.
-    /// This is not referenced but must be stored so that it is dropped when
-    /// the Task is dropped.
-    _ktask_region: TaskVirtualRegionGuard,
-
     /// Task virtual memory range for use at CPL 0
     vm_kernel_range: VMR,
 
     /// Task virtual memory range for use at CPL 3 - None for kernel tasks
     vm_user_range: Option<VMR>,
+
+    /// Virtual address region that has been allocated for this task.
+    /// This is not referenced but must be stored so that it is dropped when
+    /// the Task is dropped.
+    ///
+    /// This field must be declared last in the struct, so that it is only
+    /// dropped after the VMR field, which unmaps the memory reserved by this
+    /// guard.
+    _ktask_region: TaskVirtualRegionGuard,
 }
 
 impl TaskMM {
