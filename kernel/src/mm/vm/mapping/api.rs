@@ -5,10 +5,12 @@
 // Author: Joerg Roedel <jroedel@suse.de>
 
 use crate::address::{PhysAddr, VirtAddr};
+use crate::cpu::{flush_tlb_global_percpu_range, flush_tlb_global_sync_range};
 use crate::error::SvsmError;
 use crate::mm::pagetable::PTEntryFlags;
 use crate::mm::vm::VMR;
 use crate::types::{PAGE_SHIFT, PageSize};
+use crate::utils::MemoryRegion;
 
 use intrusive_collections::rbtree::AtomicLink;
 use intrusive_collections::{KeyAdapter, intrusive_adapter};
@@ -210,5 +212,17 @@ impl VMM {
 
     pub fn get_mapping_clone(&self) -> Mapping {
         self.mapping.clone()
+    }
+
+    /// Flushes all TLB entries corresponding to this VMM.
+    pub fn flush_tlb(&self, per_cpu: bool) {
+        let range = self.range();
+        let region = MemoryRegion::from_addresses(range.0, range.1);
+        let pgsize = self.get_mapping().page_size();
+        if per_cpu {
+            flush_tlb_global_percpu_range(region, pgsize);
+        } else {
+            flush_tlb_global_sync_range(region, pgsize);
+        }
     }
 }

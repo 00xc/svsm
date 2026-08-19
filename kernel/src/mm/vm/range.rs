@@ -5,7 +5,6 @@
 // Author: Joerg Roedel <jroedel@suse.de>
 
 use crate::address::{Address, VirtAddr};
-use crate::cpu::{flush_tlb_global_percpu_range, flush_tlb_global_sync_range};
 use crate::error::SvsmError;
 use crate::locking::RWLock;
 use crate::mm::pagetable::{PTEntryFlags, PageTable, PageTablePart};
@@ -436,16 +435,7 @@ impl VMR {
         let mut cursor = tree.find_mut(&addr);
         let node = cursor.remove().ok_or(SvsmError::Mem)?;
         self.unmap_vmm(&node);
-
-        let range = node.range();
-        let region = MemoryRegion::from_addresses(range.0, range.1);
-        let pgsize = node.get_mapping().page_size();
-
-        if self.per_cpu {
-            flush_tlb_global_percpu_range(region, pgsize);
-        } else {
-            flush_tlb_global_sync_range(region, pgsize);
-        }
+        node.flush_tlb(self.per_cpu);
 
         Ok(node)
     }
