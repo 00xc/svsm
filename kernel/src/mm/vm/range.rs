@@ -507,6 +507,23 @@ impl VMR {
     }
 }
 
+impl Drop for VMR {
+    fn drop(&mut self) {
+        // Drain the RBTree and unmap any remaining PTEs
+        let mut tree = self.tree.lock_write();
+        let mut cursor = tree.cursor_mut();
+        while let Some(vmm) = cursor.remove() {
+            if !vmm.get_mapping().has_data() {
+                continue;
+            }
+            let (start, end) = vmm.range();
+            log::warn!("VMR dropped with active mapping: {start:#018x}-{end:#018x}");
+            self.unmap_vmm(&vmm);
+            vmm.flush_tlb(self.per_cpu);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct VMRMapping<'a> {
     vmr: &'a VMR,
