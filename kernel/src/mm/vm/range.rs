@@ -80,7 +80,7 @@ impl VMR {
     /// A new instance of [`struct VMR`].
     pub fn new(start: VirtAddr, end: VirtAddr, flags: PTEntryFlags) -> Result<Self, SvsmError> {
         if start >= end || !start.is_aligned(VMR_GRANULE) || !end.is_aligned(VMR_GRANULE) {
-            log::warn!("Attempted to create an invalid VMR {start:#018x}-{start:#018x}");
+            log::warn!("Attempted to create an invalid VMR {start:#018x}-{end:#018x}");
             return Err(SvsmError::Mem);
         }
         // Global and User are per VMR flags
