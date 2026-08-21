@@ -13,7 +13,7 @@ use crate::cpu::registers::RFlags;
 use crate::error::SvsmError;
 use crate::mm::{
     PGTABLE_LVL3_IDX_PTE_SELFMAP, PGTABLE_LVL3_IDX_SHARED, PageBox, SVSM_PTE_BASE, phys_to_virt,
-    virt_to_phys,
+    virt_from_idx, virt_to_phys,
 };
 use crate::platform::SvsmPlatform;
 use crate::types::{PAGE_SIZE, PAGE_SIZE_1G, PAGE_SIZE_2M, PageSize};
@@ -547,6 +547,7 @@ impl PageFrame {
 #[derive(Debug)]
 pub struct ActivePageTable<'a> {
     pt: &'a mut PageTable,
+    selfmap_idx: usize,
 }
 
 impl ActivePageTable<'_> {
@@ -556,8 +557,9 @@ impl ActivePageTable<'_> {
     /// # Parameters
     /// - `vaddr': The virtual address whose PTE should be located.
     #[inline]
-    fn get_pte_address(vaddr: VirtAddr) -> *mut PTEntry {
-        let vaddr = SVSM_PTE_BASE + ((usize::from(vaddr) & 0x0000_FFFF_FFFF_F000) >> 9);
+    fn get_pte_address(&self, vaddr: VirtAddr) -> *mut PTEntry {
+        let base = virt_from_idx(self.selfmap_idx);
+        let vaddr = base + ((usize::from(vaddr) & 0x0000_FFFF_FFFF_F000) >> 9);
         vaddr.as_mut_ptr()
     }
 
@@ -565,10 +567,10 @@ impl ActivePageTable<'_> {
     ///
     /// Returns a `Mapping` representing the found PTE.
     pub fn walk_addr(&mut self, vaddr: VirtAddr) -> Mapping<'_> {
-        let pte_addr = Self::get_pte_address(vaddr);
-        let pde_addr = Self::get_pte_address(pte_addr.into());
-        let pdpe_addr = Self::get_pte_address(pde_addr.into());
-        let pml4e_addr = Self::get_pte_address(pdpe_addr.into());
+        let pte_addr = self.get_pte_address(vaddr);
+        let pde_addr = self.get_pte_address(pte_addr.into());
+        let pdpe_addr = self.get_pte_address(pde_addr.into());
+        let pml4e_addr = self.get_pte_address(pdpe_addr.into());
 
         let addrs = [pte_addr, pde_addr, pdpe_addr, pml4e_addr];
         for (level, addr) in addrs.into_iter().enumerate().skip(1).rev() {
@@ -1019,7 +1021,10 @@ impl PageTable {
     /// The caller must ensure that this page table is currently loaded
     /// in CR3.
     pub unsafe fn as_active(&mut self) -> ActivePageTable<'_> {
-        ActivePageTable { pt: self }
+        ActivePageTable {
+            pt: self,
+            selfmap_idx: PGTABLE_LVL3_IDX_PTE_SELFMAP,
+        }
     }
 
     /// Load the current page table into the CR3 register.
