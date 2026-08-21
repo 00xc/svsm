@@ -544,13 +544,29 @@ impl PageFrame {
 /// A wrapper over a [`RawPageTable`] for a page table that is currently
 /// loaded in CR3. It allows allows using methods that rely on the page
 /// table self-map.
+///
+/// `L` represents the 0-indexed level in the page table hierarchy that
+/// this `ActivePageTable` maps. This is typically 3 for a 4-level page
+/// table, but can be smaller for page table subtrees.
 #[derive(Debug)]
-pub struct ActivePageTable<'a> {
-    pt: &'a mut PageTable,
+pub struct ActivePageTable<'a, const L: usize = 3> {
+    pt: &'a mut PTPage,
     selfmap_idx: usize,
 }
 
-impl ActivePageTable<'_> {
+impl<'a> ActivePageTable<'a, 3> {
+    /// # Safety
+    ///
+    /// The caller must ensure that `pt` is currently loaded in CR3.
+    unsafe fn from_active(pt: &'a mut PageTable) -> Self {
+        Self {
+            pt: &mut pt.root,
+            selfmap_idx: PGTABLE_LVL3_IDX_PTE_SELFMAP,
+        }
+    }
+}
+
+impl<const L: usize> ActivePageTable<'_, L> {
     /// Obtain a pointer to a PTE in the self-map, which maps the specified
     /// virtual address.
     ///
@@ -992,17 +1008,25 @@ impl ActivePageTable<'_> {
     }
 }
 
-impl Deref for ActivePageTable<'_> {
+impl Deref for ActivePageTable<'_, 3> {
     type Target = PageTable;
 
     fn deref(&self) -> &Self::Target {
-        self.pt
+        // SAFETY: self.pt is a PTPage, and PageTable is repr(C) with
+        // a single PTPage field, so both types have the same layout.
+        // We only permit the conversion when the generic L parameter
+        // is 3, which means that self.pt is a top-level page table.
+        unsafe { &*core::ptr::from_ref(self.pt).cast::<PageTable>() }
     }
 }
 
-impl DerefMut for ActivePageTable<'_> {
+impl DerefMut for ActivePageTable<'_, 3> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.pt
+        // SAFETY: self.pt is a PTPage, and PageTable is repr(C) with
+        // a single PTPage field, so both types have the same layout.
+        // We only permit the conversion when the generic L parameter
+        // is 3, which means that self.pt is a top-level page table.
+        unsafe { &mut *core::ptr::from_mut(self.pt).cast::<PageTable>() }
     }
 }
 
@@ -1021,10 +1045,8 @@ impl PageTable {
     /// The caller must ensure that this page table is currently loaded
     /// in CR3.
     pub unsafe fn as_active(&mut self) -> ActivePageTable<'_> {
-        ActivePageTable {
-            pt: self,
-            selfmap_idx: PGTABLE_LVL3_IDX_PTE_SELFMAP,
-        }
+        // SAFETY: delegated to caller
+        unsafe { ActivePageTable::from_active(self) }
     }
 
     /// Load the current page table into the CR3 register.
