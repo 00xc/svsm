@@ -1243,16 +1243,6 @@ impl PageTable {
         Mapping::new(entry, 0)
     }
 
-    /// Gets the physical address for a mapped `vaddr` or `None` if
-    /// no such mapping exists.
-    pub fn check_mapping(&mut self, vaddr: VirtAddr) -> Option<PhysAddr> {
-        let mapping = self.walk_addr(vaddr);
-        match mapping.level {
-            0 | 1 => Some(mapping.entry.address()),
-            _ => None,
-        }
-    }
-
     /// Populates this page table with the contents of the given subtree
     /// in `part`.
     ///
