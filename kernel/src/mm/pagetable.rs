@@ -1209,42 +1209,6 @@ impl PageTable {
         vaddr.bits() >> (12 + level * 9) & 0x1ff
     }
 
-    /// Walk the virtual address and return the corresponding mapping,
-    /// starting at the specified level in the hierarchy.
-    ///
-    /// # Parameters
-    /// - `page`: A mutable reference to the root page table.
-    /// - `vaddr`: The virtual address to find a mapping for.
-    /// - `level`: the level in the page table hierarchy at which to
-    ///   start the walk.
-    ///
-    /// # Returns
-    /// A `Mapping` representing the found mapping.
-    fn walk_addr_at(mut page: &mut PTPage, vaddr: VirtAddr, level: usize) -> Mapping<'_> {
-        for level in (1..=level).rev() {
-            let idx = Self::index_at(vaddr, level);
-            let entry = &mut page[idx];
-            match PTPage::from_entry(*entry) {
-                Some(p) => page = p,
-                None => return Mapping::new(entry, level),
-            }
-        }
-
-        let idx = Self::index::<0>(vaddr);
-        Mapping::new(&mut page[idx], 0)
-    }
-
-    /// Walk the virtual address and return the corresponding mapping.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address to find a mapping for.
-    ///
-    /// # Returns
-    /// A `Mapping` representing the found mapping.
-    fn walk_addr(&mut self, vaddr: VirtAddr) -> Mapping<'_> {
-        Self::walk_addr_at(&mut self.root, vaddr, 3)
-    }
-
     /// Calculate the virtual address of a PTE in the self-map, which maps a
     /// specified virtual address.
     ///
@@ -1387,18 +1351,6 @@ impl RawPageTablePart {
     /// Returns the physical address of this page table part.
     fn address(&self) -> PhysAddr {
         virt_to_phys(VirtAddr::from(self as *const RawPageTablePart))
-    }
-
-    /// Walks the page table at level 3 to find the mapping for a given
-    /// virtual address.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address to find the mapping for.
-    ///
-    /// # Returns
-    /// The [`Mapping`] for the given virtual address.
-    fn walk_addr(&mut self, vaddr: VirtAddr) -> Mapping<'_> {
-        PageTable::walk_addr_at(&mut self.page, vaddr, 2)
     }
 }
 
