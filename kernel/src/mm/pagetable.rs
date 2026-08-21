@@ -7,13 +7,14 @@
 use crate::BIT_MASK;
 use crate::address::{Address, PhysAddr, VirtAddr};
 use crate::cpu::control_regs::write_cr3;
-use crate::cpu::flush_tlb_global_sync;
 use crate::cpu::idt::common::PageFaultError;
+use crate::cpu::percpu::this_cpu;
 use crate::cpu::registers::RFlags;
+use crate::cpu::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::error::SvsmError;
 use crate::mm::{
-    PGTABLE_LVL3_IDX_PTE_SELFMAP, PGTABLE_LVL3_IDX_SHARED, PageBox, SVSM_PTE_BASE, phys_to_virt,
-    virt_from_idx, virt_to_phys,
+    PGTABLE_LVL3_IDX_PTE_SELFMAP, PGTABLE_LVL3_IDX_SHARED, PGTABLE_LVL3_IDX_TEMP_SELFMAP, PageBox,
+    SVSM_PTE_BASE, phys_to_virt, virt_from_idx, virt_to_phys,
 };
 use crate::platform::SvsmPlatform;
 use crate::types::{PAGE_SIZE, PAGE_SIZE_1G, PAGE_SIZE_2M, PageSize};
@@ -552,6 +553,7 @@ impl PageFrame {
 pub struct ActivePageTable<'a, const L: usize = 3> {
     pt: &'a mut PTPage,
     selfmap_idx: usize,
+    temp_pml4: Option<NonNull<PTPage>>,
 }
 
 impl<'a> ActivePageTable<'a, 3> {
@@ -562,7 +564,57 @@ impl<'a> ActivePageTable<'a, 3> {
         Self {
             pt: &mut pt.root,
             selfmap_idx: PGTABLE_LVL3_IDX_PTE_SELFMAP,
+            temp_pml4: None,
         }
+    }
+}
+
+impl<'a> ActivePageTable<'a, 2> {
+    /// Creates an ActivePageTable for an inactive page table subtree,
+    /// using a temporary self-map.
+    ///
+    /// # Parameters
+    /// - `root`: The root page table structure to wrap
+    /// - `idx`: The top-level PML4 index this page table subtree is populated at.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure that `root` points to a level 2 page table subtree,
+    /// and that a page table with a selfmap at `PGTABLE_LVL3_IDX_PTE_SELFMAP`
+    /// is active.
+    unsafe fn from_inactive(root: &'a mut PTPage, idx: usize) -> Result<Self, SvsmError> {
+        this_cpu().inc_temp_selfmap_nesting().inspect_err(|_| {
+            log::error!("Attempted nested use of temporary self-map");
+        })?;
+
+        // Get access to the active PML4 via the real self-map
+        let active_pml4_vaddr = virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP)
+            + ((virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP).as_usize() & 0x0000_FFFF_FFFF_F000)
+                >> 9);
+        // SAFETY: the caller ensures that the selfmap is installed in the current page table.
+        let active_pml4 = unsafe { &mut *(active_pml4_vaddr.as_mut_ptr::<PTPage>()) };
+
+        // Find the physical address of the page table root
+        let root_phys = virt_to_phys(VirtAddr::from(core::ptr::from_mut(root)));
+
+        // Allocate intermediate PML4, make it point to the inactive
+        // PDPT, and to itself to set up the recursive self-map
+        let (temp_pml4, pml4_phys) = PTPage::alloc()?;
+        temp_pml4[idx].set(make_private_address(root_phys), PTEntryFlags::task_data());
+        temp_pml4[PGTABLE_LVL3_IDX_TEMP_SELFMAP]
+            .set(make_private_address(pml4_phys), PTEntryFlags::task_data());
+        let temp_pml4_ptr = Some(NonNull::from(temp_pml4));
+
+        // Install temporary self-map in active page table
+        active_pml4[PGTABLE_LVL3_IDX_TEMP_SELFMAP]
+            .set(make_private_address(pml4_phys), PTEntryFlags::task_data());
+        flush_tlb_global_sync();
+
+        Ok(Self {
+            pt: root,
+            selfmap_idx: PGTABLE_LVL3_IDX_TEMP_SELFMAP,
+            temp_pml4: temp_pml4_ptr,
+        })
     }
 }
 
@@ -1022,11 +1074,34 @@ impl Deref for ActivePageTable<'_, 3> {
 
 impl DerefMut for ActivePageTable<'_, 3> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: self.pt is a PTPage, and PageTable is repr(C) with
-        // a single PTPage field, so both types have the same layout.
-        // We only permit the conversion when the generic L parameter
-        // is 3, which means that self.pt is a top-level page table.
+        // SAFETY: See comment in deref()
         unsafe { &mut *core::ptr::from_mut(self.pt).cast::<PageTable>() }
+    }
+}
+
+impl<const L: usize> Drop for ActivePageTable<'_, L> {
+    fn drop(&mut self) {
+        if L == 3 {
+            return;
+        }
+
+        // Get access to the active PML4 via the real self-map, and clear
+        // the temporary mapping.
+        let active_pml4_vaddr = virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP)
+            + ((virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP).as_usize() & 0x0000_FFFF_FFFF_F000)
+                >> 9);
+        let active_pml4 = unsafe { &mut *(active_pml4_vaddr.as_mut_ptr::<PTPage>()) };
+        active_pml4[self.selfmap_idx].clear();
+        flush_tlb_global_percpu();
+
+        if let Some(ptr) = self.temp_pml4.take() {
+            // SAFETY: We allocated this in from_inactive
+            unsafe {
+                let _ = PageBox::from_raw(ptr);
+            }
+        }
+
+        this_cpu().dec_temp_selfmap_nesting();
     }
 }
 

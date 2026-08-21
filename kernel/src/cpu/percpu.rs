@@ -417,6 +417,9 @@ where
     /// PerCpu IRQ state tracking
     irq_state: IrqState,
 
+    /// Temporary inactive page table self-map count
+    selfmap_nesting: AtomicUsize,
+
     pgtbl: AtomicUsize,
     cr3: AtomicUsize,
     tss: X86Tss,
@@ -457,6 +460,7 @@ impl PerCpu {
             cr3: AtomicUsize::new(0),
             apic: X86Apic::default(),
             irq_state: IrqState::new(),
+            selfmap_nesting: AtomicUsize::new(0),
             tss: X86Tss::new(),
             isst: RWLock::new(Isst::default()),
             svsm_vmsa: ImmutAfterInitCell::uninit(),
@@ -579,6 +583,18 @@ impl PerCpu {
     #[inline(always)]
     pub fn lower_tpr(&self, tpr_value: usize) {
         self.irq_state.lower_tpr(tpr_value);
+    }
+
+    pub fn inc_temp_selfmap_nesting(&self) -> Result<(), SvsmError> {
+        self.selfmap_nesting
+            .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+            .map_err(|_| SvsmError::Mem)?;
+        Ok(())
+    }
+
+    pub fn dec_temp_selfmap_nesting(&self) {
+        let prev = self.selfmap_nesting.swap(0, Ordering::Relaxed);
+        assert_eq!(prev, 1);
     }
 
     /// Sets up the CPU-local GHCB page.

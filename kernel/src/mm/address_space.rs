@@ -259,6 +259,9 @@ const _: () = assert!(PGTABLE_LVL3_IDX_PTE_SELFMAP == bootimg::PGTABLE_LVL3_IDX_
 
 pub const SVSM_PTE_BASE: VirtAddr = virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP);
 
+/// Page table temporary self-map level 3 index
+pub const PGTABLE_LVL3_IDX_TEMP_SELFMAP: usize = 492;
+
 //
 // User-space mapping constants
 //
