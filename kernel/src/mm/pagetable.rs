@@ -549,6 +549,46 @@ pub struct ActivePageTable<'a> {
     pt: &'a mut PageTable,
 }
 
+impl ActivePageTable<'_> {
+    /// Obtain a pointer to a PTE in the self-map, which maps the specified
+    /// virtual address.
+    ///
+    /// # Parameters
+    /// - `vaddr': The virtual address whose PTE should be located.
+    #[inline]
+    fn get_pte_address(vaddr: VirtAddr) -> *mut PTEntry {
+        let vaddr = SVSM_PTE_BASE + ((usize::from(vaddr) & 0x0000_FFFF_FFFF_F000) >> 9);
+        vaddr.as_mut_ptr()
+    }
+
+    /// Walks the page table using self-map to find the mapping for a virtual address.
+    ///
+    /// Returns a `Mapping` representing the found PTE.
+    pub fn walk_addr(&mut self, vaddr: VirtAddr) -> Mapping<'_> {
+        let pte_addr = Self::get_pte_address(vaddr);
+        let pde_addr = Self::get_pte_address(pte_addr.into());
+        let pdpe_addr = Self::get_pte_address(pde_addr.into());
+        let pml4e_addr = Self::get_pte_address(pdpe_addr.into());
+
+        let addrs = [pte_addr, pde_addr, pdpe_addr, pml4e_addr];
+        for (level, addr) in addrs.into_iter().enumerate().skip(1).rev() {
+            // SAFETY: the top-level entry is guaranteed to be valid
+            // memory by construction. We then read the hierarchy from
+            // from the top down, so each subsequent access is safe.
+            let entry = unsafe { &mut *addr };
+            let is_huge = (level == 1 || level == 2) && entry.huge();
+            if !entry.present() || is_huge {
+                return Mapping::new(entry, level);
+            }
+        }
+
+        // SAFETY: we have traversed the hierarcy from the top down
+        // and only encountered present entries.
+        let entry = unsafe { &mut *addrs[0] };
+        Mapping::new(entry, 0)
+    }
+}
+
 impl Deref for ActivePageTable<'_> {
     type Target = PageTable;
 
