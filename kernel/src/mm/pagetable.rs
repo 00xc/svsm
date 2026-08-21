@@ -587,6 +587,85 @@ impl ActivePageTable<'_> {
         let entry = unsafe { &mut *addrs[0] };
         Mapping::new(entry, 0)
     }
+
+    /// Splits a page into 4KB pages if it is part of a larger mapping.
+    fn split_4k(mapping: Mapping<'_>) -> Result<(), SvsmError> {
+        match mapping.level {
+            0 => return Ok(()),
+            1 => (),
+            _ => return Err(SvsmError::Mem),
+        }
+
+        // Allocate a new page to hold the PTEs
+        let (page, paddr) = PTPage::alloc()?;
+
+        let mut flags = mapping.entry.flags();
+        assert!(flags.contains(PTEntryFlags::HUGE));
+        flags.remove(PTEntryFlags::HUGE);
+
+        // Prepare PTE leaf page
+        let addr_2m = PhysAddr::from(mapping.entry.address().bits() & 0x000f_ffff_fff0_0000);
+        for (i, e) in page.entries.iter_mut().enumerate() {
+            let addr_4k = addr_2m + (i * PAGE_SIZE);
+            e.clear();
+            e.set(make_private_address(addr_4k), flags);
+        }
+
+        mapping.entry.set(make_private_address(paddr), flags);
+        flush_tlb_global_sync();
+        Ok(())
+    }
+
+    #[inline]
+    fn make_pte_shared(entry: &mut PTEntry) {
+        // entry.address() returned with c-bit clear already
+        entry.set(make_shared_address(entry.address()), entry.flags());
+    }
+
+    #[inline]
+    fn make_pte_private(entry: &mut PTEntry) {
+        // entry.address() returned with c-bit clear already
+        entry.set(make_private_address(entry.address()), entry.flags());
+    }
+
+    fn set_pte_visibility_4k(&mut self, vaddr: VirtAddr, shared: bool) -> Result<(), SvsmError> {
+        let mapping = self.walk_addr(vaddr);
+        Self::split_4k(mapping)?;
+
+        let mapping = self.walk_addr(vaddr);
+        if mapping.level != 0 {
+            return Err(SvsmError::Mem);
+        }
+
+        match shared {
+            true => Self::make_pte_shared(mapping.entry),
+            false => Self::make_pte_private(mapping.entry),
+        }
+        Ok(())
+    }
+
+    /// Sets the shared state for a 4KB page.
+    ///
+    /// # Parameters
+    /// - `vaddr`: The virtual address of the page.
+    ///
+    /// # Returns
+    /// A result indicating success or an error [`SvsmError`] if the
+    /// operation fails.
+    pub fn set_shared_4k(&mut self, vaddr: VirtAddr) -> Result<(), SvsmError> {
+        self.set_pte_visibility_4k(vaddr, true)
+    }
+
+    /// Sets the encryption state for a 4KB page.
+    ///
+    /// # Parameters
+    /// - `vaddr`: The virtual address of the page.
+    ///
+    /// # Returns
+    /// A result indicating success or an error [`SvsmError`].
+    pub fn set_encrypted_4k(&mut self, vaddr: VirtAddr) -> Result<(), SvsmError> {
+        self.set_pte_visibility_4k(vaddr, false)
+    }
 }
 
 impl Deref for ActivePageTable<'_> {
@@ -853,107 +932,6 @@ impl PageTable {
     fn alloc_pte(&mut self, vaddr: VirtAddr, size: PageSize) -> Mapping<'_> {
         let m = self.walk_addr(vaddr);
         Self::alloc_intermediate_ptes(m, vaddr, size)
-    }
-
-    /// Splits a 2MB page into 4KB pages.
-    ///
-    /// # Parameters
-    /// - `entry`: The 2M page table entry to split.
-    ///
-    /// # Returns
-    /// A result indicating success or an error [`SvsmError`] in failure.
-    fn do_split_4k(entry: &mut PTEntry) -> Result<(), SvsmError> {
-        let (page, paddr) = PTPage::alloc()?;
-        let mut flags = entry.flags();
-
-        assert!(flags.contains(PTEntryFlags::HUGE));
-
-        let addr_2m = PhysAddr::from(entry.address().bits() & 0x000f_ffff_fff0_0000);
-
-        flags.remove(PTEntryFlags::HUGE);
-
-        // Prepare PTE leaf page
-        for (i, e) in page.entries.iter_mut().enumerate() {
-            let addr_4k = addr_2m + (i * PAGE_SIZE);
-            e.clear();
-            e.set(make_private_address(addr_4k), flags);
-        }
-
-        entry.set(make_private_address(paddr), flags);
-
-        flush_tlb_global_sync();
-
-        Ok(())
-    }
-
-    /// Splits a page into 4KB pages if it is part of a larger mapping.
-    ///
-    /// # Parameters
-    /// - `mapping`: The mapping to split.
-    ///
-    /// # Returns
-    /// A result indicating success or an error [`SvsmError`].
-    fn split_4k(mapping: Mapping<'_>) -> Result<(), SvsmError> {
-        match mapping.level {
-            0 => Ok(()),
-            1 => Self::do_split_4k(mapping.entry),
-            _ => Err(SvsmError::Mem),
-        }
-    }
-
-    fn make_pte_shared(entry: &mut PTEntry) {
-        let flags = entry.flags();
-        let addr = entry.address();
-
-        // entry.address() returned with c-bit clear already
-        entry.set(make_shared_address(addr), flags);
-    }
-
-    fn make_pte_private(entry: &mut PTEntry) {
-        let flags = entry.flags();
-        let addr = entry.address();
-
-        // entry.address() returned with c-bit clear already
-        entry.set(make_private_address(addr), flags);
-    }
-
-    fn set_pte_visibility_4k(&mut self, vaddr: VirtAddr, shared: bool) -> Result<(), SvsmError> {
-        let mapping = self.walk_addr(vaddr);
-        Self::split_4k(mapping)?;
-
-        let mapping = self.walk_addr(vaddr);
-        if mapping.level != 0 {
-            return Err(SvsmError::Mem);
-        }
-
-        match shared {
-            true => Self::make_pte_shared(mapping.entry),
-            false => Self::make_pte_private(mapping.entry),
-        }
-        Ok(())
-    }
-
-    /// Sets the shared state for a 4KB page.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address of the page.
-    ///
-    /// # Returns
-    /// A result indicating success or an error [`SvsmError`] if the
-    /// operation fails.
-    pub fn set_shared_4k(&mut self, vaddr: VirtAddr) -> Result<(), SvsmError> {
-        self.set_pte_visibility_4k(vaddr, true)
-    }
-
-    /// Sets the encryption state for a 4KB page.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address of the page.
-    ///
-    /// # Returns
-    /// A result indicating success or an error [`SvsmError`].
-    pub fn set_encrypted_4k(&mut self, vaddr: VirtAddr) -> Result<(), SvsmError> {
-        self.set_pte_visibility_4k(vaddr, false)
     }
 
     /// Gets the physical address for a mapped `vaddr` or `None` if
