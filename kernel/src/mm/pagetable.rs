@@ -909,6 +909,52 @@ impl ActivePageTable<'_> {
             }
         }
     }
+
+    /// Makes the memory region pages read-only.
+    /// This method is meant for global pages only.
+    ///
+    /// # Safety
+    ///
+    /// The caller should verify that `region` can be made read-only, i.e. that
+    /// no write can happen or that a #PF raised by any tentative write is
+    /// expected.
+    /// The caller must also ensure that the region start and size are 4k
+    /// aligned.
+    pub unsafe fn make_region_ro_4k(
+        &mut self,
+        region: MemoryRegion<VirtAddr>,
+    ) -> Result<(), SvsmError> {
+        for page in region.iter_pages(PageSize::Regular) {
+            let mapping = self.walk_addr(page);
+            match mapping.level {
+                0 => {
+                    let entry = mapping.entry;
+                    if !entry.present() || !entry.global() {
+                        return Err(SvsmError::Mem);
+                    }
+
+                    let flags = PTEntryFlags::data_ro();
+
+                    let paddr = if is_shared(entry.0) {
+                        make_shared_address(entry.address())
+                    } else {
+                        make_private_address(entry.address())
+                    };
+
+                    entry.set(paddr, flags);
+                }
+                1 | 2 => {
+                    // Ensure we never fell on a huge page while iterating over the region pages.
+                    if mapping.entry.huge() {
+                        return Err(SvsmError::Mem);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Deref for ActivePageTable<'_> {
@@ -1224,52 +1270,6 @@ impl PageTable {
         let prev = entry.raw();
         entry.set(make_private_address(paddr), flags);
         prev != entry.raw()
-    }
-
-    /// Makes the memory region pages read-only.
-    /// This method is meant for global pages only.
-    ///
-    /// # Safety
-    ///
-    /// The caller should verify that `region` can be made read-only, i.e. that
-    /// no write can happen or that a #PF raised by any tentative write is
-    /// expected.
-    /// The caller must also ensure that the region start and size are 4k
-    /// aligned.
-    pub unsafe fn make_region_ro_4k(
-        &mut self,
-        region: MemoryRegion<VirtAddr>,
-    ) -> Result<(), SvsmError> {
-        for page in region.iter_pages(PageSize::Regular) {
-            let mapping = self.walk_addr(page);
-            match mapping.level {
-                0 => {
-                    let entry = mapping.entry;
-                    if !entry.present() || !entry.global() {
-                        return Err(SvsmError::Mem);
-                    }
-
-                    let flags = PTEntryFlags::data_ro();
-
-                    let paddr = if is_shared(entry.0) {
-                        make_shared_address(entry.address())
-                    } else {
-                        make_private_address(entry.address())
-                    };
-
-                    entry.set(paddr, flags);
-                }
-                1 | 2 => {
-                    // Ensure we never fell on a huge page while iterating over the region pages.
-                    if mapping.entry.huge() {
-                        return Err(SvsmError::Mem);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        Ok(())
     }
 }
 
