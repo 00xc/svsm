@@ -32,7 +32,7 @@ use crate::locking::{
     WriteLockGuard, WriteLockGuardIrqSafe,
 };
 use crate::mm::page_visibility::SharedBox;
-use crate::mm::pagetable::{PTEntryFlags, PageTable};
+use crate::mm::pagetable::{ActivePageTable, PTEntryFlags, PageTable};
 use crate::mm::virtualrange::VirtualRange;
 use crate::mm::vm::{Mapping, VMKernelStack, VMPhysMem, VMR, VMRMapping, VMReserved};
 use crate::mm::{
@@ -744,15 +744,20 @@ impl PerCpu {
         Ok(())
     }
 
-    pub fn get_pgtable(&self) -> &'static mut PageTable {
+    fn get_raw_pgtable(&self) -> &'static mut PageTable {
         // SAFETY: `self.pgtbl` is a write-once variable that holds the
         // physical address of this processor's paging root.  It is stored as
         // an `AtomicUsize` so it can be read from contexts that cannot
-        // acquire locks.
+        // acquire locks. By definition, this is the active page table.
         unsafe {
             let mut p = NonNull::new(self.pgtbl.load(Ordering::Relaxed) as *mut PageTable).unwrap();
             p.as_mut()
         }
+    }
+
+    pub fn get_pgtable(&self) -> ActivePageTable<'_> {
+        // SAFETY: by definition, this is the active page table.
+        unsafe { self.get_raw_pgtable().as_active() }
     }
 
     /// Registers an already set up GHCB page for this CPU.
@@ -817,7 +822,7 @@ impl PerCpu {
     }
 
     fn finish_page_table(&self) {
-        let pgtable = self.get_pgtable();
+        let pgtable = self.get_raw_pgtable();
         self.vm_range.populate(pgtable);
     }
 
@@ -921,7 +926,7 @@ impl PerCpu {
     pub fn load(&'static self) {
         // SAFETY: along with the page table we are also uploading the right
         // TSS and ISST to ensure a memory safe execution state
-        unsafe { self.get_pgtable().load() };
+        unsafe { self.get_raw_pgtable().load() };
         self.load_gdt_tss(false);
         if is_cet_ss_enabled() {
             self.load_isst();
@@ -1204,8 +1209,8 @@ impl PerCpu {
     }
 
     pub fn handle_pf(&self, vaddr: VirtAddr, write: bool) -> Result<(), SvsmError> {
-        let pgtable = self.get_pgtable();
-        self.vm_range.handle_page_fault(pgtable, vaddr, write)
+        let mut pgtable = self.get_pgtable();
+        self.vm_range.handle_page_fault(&mut pgtable, vaddr, write)
     }
 
     pub fn schedule_init(&self) -> TaskPointer {

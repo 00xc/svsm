@@ -21,7 +21,7 @@ use crate::utils::MemoryRegion;
 use crate::utils::immut_after_init::{ImmutAfterInitCell, ImmutAfterInitResult};
 use bitflags::bitflags;
 use core::cmp;
-use core::ops::{Index, IndexMut};
+use core::ops::{Deref, DerefMut, Index, IndexMut};
 use core::ptr::NonNull;
 use cpuarch::x86::CR0Flags;
 use cpuarch::x86::CR4Flags;
@@ -541,6 +541,28 @@ impl PageFrame {
     }
 }
 
+/// A wrapper over a [`RawPageTable`] for a page table that is currently
+/// loaded in CR3. It allows allows using methods that rely on the page
+/// table self-map.
+#[derive(Debug)]
+pub struct ActivePageTable<'a> {
+    pt: &'a mut PageTable,
+}
+
+impl Deref for ActivePageTable<'_> {
+    type Target = PageTable;
+
+    fn deref(&self) -> &Self::Target {
+        self.pt
+    }
+}
+
+impl DerefMut for ActivePageTable<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.pt
+    }
+}
+
 /// Page table structure containing a root page with multiple entries.
 #[repr(C)]
 #[derive(Debug, FromZeros)]
@@ -549,6 +571,16 @@ pub struct PageTable {
 }
 
 impl PageTable {
+    /// Reinterpret this page table as an [`ActivePageTable`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that this page table is currently loaded
+    /// in CR3.
+    pub unsafe fn as_active(&mut self) -> ActivePageTable<'_> {
+        ActivePageTable { pt: self }
+    }
+
     /// Load the current page table into the CR3 register.
     ///
     /// # Safety
