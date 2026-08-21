@@ -955,6 +955,39 @@ impl ActivePageTable<'_> {
 
         Ok(())
     }
+
+    /// Retrieves the physical address of a mapping.
+    ///
+    /// # Parameters
+    /// - `vaddr`: The virtual address to query.
+    ///
+    /// # Returns
+    /// The physical address of the mapping if present; otherwise, an error
+    /// ([`SvsmError`]).
+    pub fn phys_addr(&mut self, vaddr: VirtAddr) -> Result<PhysAddr, SvsmError> {
+        let mapping = self.walk_addr(vaddr);
+
+        match mapping.level {
+            0 => {
+                let entry = mapping.entry;
+                let offset = vaddr.page_offset();
+                if !entry.present() {
+                    return Err(SvsmError::Mem);
+                }
+                Ok(entry.address() + offset)
+            }
+            1 => {
+                let entry = mapping.entry;
+                let offset = vaddr.bits() & (PAGE_SIZE_2M - 1);
+                if !entry.present() || !entry.huge() {
+                    return Err(SvsmError::Mem);
+                }
+
+                Ok(entry.address() + offset)
+            }
+            _ => Err(SvsmError::Mem),
+        }
+    }
 }
 
 impl Deref for ActivePageTable<'_> {
@@ -1217,39 +1250,6 @@ impl PageTable {
         match mapping.level {
             0 | 1 => Some(mapping.entry.address()),
             _ => None,
-        }
-    }
-
-    /// Retrieves the physical address of a mapping.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address to query.
-    ///
-    /// # Returns
-    /// The physical address of the mapping if present; otherwise, an error
-    /// ([`SvsmError`]).
-    pub fn phys_addr(&mut self, vaddr: VirtAddr) -> Result<PhysAddr, SvsmError> {
-        let mapping = self.walk_addr(vaddr);
-
-        match mapping.level {
-            0 => {
-                let entry = mapping.entry;
-                let offset = vaddr.page_offset();
-                if !entry.present() {
-                    return Err(SvsmError::Mem);
-                }
-                Ok(entry.address() + offset)
-            }
-            1 => {
-                let entry = mapping.entry;
-                let offset = vaddr.bits() & (PAGE_SIZE_2M - 1);
-                if !entry.present() || !entry.huge() {
-                    return Err(SvsmError::Mem);
-                }
-
-                Ok(entry.address() + offset)
-            }
-            _ => Err(SvsmError::Mem),
         }
     }
 
