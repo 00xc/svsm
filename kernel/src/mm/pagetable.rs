@@ -222,9 +222,11 @@ impl PTEntry {
         self.0.is_null()
     }
 
-    /// Clear the page table entry.
-    pub fn clear(&mut self) {
+    /// Clear the page table entry, returning the previous value
+    pub fn clear(&mut self) -> Self {
+        let prev = *self;
         self.0 = PhysAddr::null();
+        prev
     }
 
     /// Check if the page table entry is present.
@@ -786,11 +788,14 @@ impl<const L: usize> ActivePageTable<'_, L> {
     ///
     /// # Parameters
     /// - `vaddr`: The virtual address of the mapping to unmap.
-    pub fn unmap_4k(&mut self, vaddr: VirtAddr) {
+    pub fn unmap_4k(&mut self, vaddr: VirtAddr) -> Option<PTEntry> {
         let mapping = self.walk_addr(vaddr);
         match mapping.level {
-            0 => mapping.entry.clear(),
-            _ => assert!(!mapping.entry.present()),
+            0 => Some(mapping.entry.clear()),
+            _ => {
+                assert!(!mapping.entry.present());
+                None
+            }
         }
     }
 
@@ -873,14 +878,15 @@ impl<const L: usize> ActivePageTable<'_, L> {
     ///
     /// # Panics
     /// Panics if `vaddr` is not aligned to a 2MB boundary.
-    pub fn unmap_2m(&mut self, vaddr: VirtAddr) {
+    pub fn unmap_2m(&mut self, vaddr: VirtAddr) -> Option<PTEntry> {
         assert!(vaddr.is_aligned(PAGE_SIZE_2M));
-
         let mapping = self.walk_addr(vaddr);
-
         match mapping.level {
-            1 => mapping.entry.clear(),
-            2 | 3 => assert!(!mapping.entry.present()),
+            1 => Some(mapping.entry.clear()),
+            2 | 3 => {
+                assert!(!mapping.entry.present());
+                None
+            }
             _ => unreachable!(),
         }
     }
