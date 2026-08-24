@@ -760,6 +760,19 @@ impl HeapMemoryRegion {
             .ok_or(AllocError::InvalidHeapAddress(vaddr))
     }
 
+    /// Gets the page frame number from a physical address.
+    #[verus_verify(external_body)]
+    fn get_pfn_phys(&self, paddr: PhysAddr) -> Result<usize, AllocError> {
+        if paddr >= self.start_phys {
+            let offset = paddr - self.start_phys;
+            if offset < self.page_count * PAGE_SIZE {
+                let pfn = offset / PAGE_SIZE;
+                return Ok(pfn);
+            }
+        }
+        Err(AllocError::InvalidHeapAddress(VirtAddr::null()))
+    }
+
     /// Gets the next available page frame number for a given order.
     #[verus_verify(spinoff_prover)]
     #[verus_spec(ret =>
@@ -1448,6 +1461,27 @@ impl HeapMemoryRegion {
             lemma_free_page!(self, alloced_perm, pfn, res => perm);
         }
 
+        proof_with!(Tracked(perm));
+        self.free_page_by_pfn(pfn, res);
+    }
+
+    /// Frees a page by page frame number, using the provided page info to
+    /// determine the correct order. This is the common implementation for
+    /// freeing pages regardless of whether the address is virtual or physical.
+    #[verus_spec(
+        with Tracked(perm): Tracked<PgUnitPerm<DeallocUnit>>
+        requires
+            old(self).wf_next_pages(),
+            old(self).valid_pfn_order(pfn, res.spec_order()),
+            perm.wf_pfn_order(old(self)@.mr_map, pfn, res.spec_order()),
+        ensures
+            old(self)@.mr_map@ == final(self)@.mr_map@,
+    )]
+    fn free_page_by_pfn(&mut self, pfn: usize, res: PageInfo) {
+        proof_decl! {
+            let tracked perm = perm;
+        }
+
         match res {
             PageInfo::Allocated(ai) => {
                 proof_with!(Tracked(perm));
@@ -1462,9 +1496,35 @@ impl HeapMemoryRegion {
                 self.free_page_order(pfn, 0);
             }
             _ => {
-                panic!("Unexpected page type in MemoryRegion::free_page()");
+                panic!("Unexpected page type in MemoryRegion::free_page_by_pfn()");
             }
         }
+    }
+
+    /// Frees a page based on its physical address, determining the page
+    /// order and freeing accordingly.
+    ///
+    /// # Verification
+    ///
+    /// This function is used for freeing pages allocated outside the normal
+    /// virtual address allocator (e.g., page table pages). Since these pages
+    /// don't have AllocatedPagesPerm tracking, we use an empty permission token
+    /// and mark this as external_body since we don't have validation that the
+    /// physical address corresponds to an actually allocated page.
+    #[verus_verify(external_body)]
+    fn free_page_phys(&mut self, paddr: PhysAddr) {
+        let Ok(pfn) = self.get_pfn_phys(paddr) else {
+            panic!("Physical address {:#018x} does not belong to the heap", paddr);
+        };
+
+        let res = self.read_page_info(pfn);
+
+        proof_decl! {
+            let tracked perm = PgUnitPerm::empty(arbitrary());
+        }
+
+        proof_with!(Tracked(perm));
+        self.free_page_by_pfn(pfn, res);
     }
 
     /// Retrieves information about memory, including total and free pages
@@ -1807,6 +1867,11 @@ fn put_file_page(vaddr: VirtAddr) -> Result<(), SvsmError> {
 /// Free the page at the given virtual address.
 pub fn free_page(vaddr: VirtAddr) {
     ROOT_MEM.lock().free_page(vaddr)
+}
+
+/// Free the page at the given physical address.
+pub fn free_page_phys(paddr: PhysAddr) {
+    ROOT_MEM.lock().free_page_phys(paddr)
 }
 
 /// Free multiple pages at the given virtual address.
