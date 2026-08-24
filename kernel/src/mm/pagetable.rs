@@ -1424,149 +1424,6 @@ impl RawPageTablePart {
     fn walk_addr(&mut self, vaddr: VirtAddr) -> Mapping<'_> {
         PageTable::walk_addr_at(&mut self.page, vaddr, 2)
     }
-
-    /// Allocates a page table entry for a given virtual address and
-    /// the given page size.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address for which to allocate the PTE.
-    ///
-    /// # Returns
-    /// The [`Mapping`] representing the allocated or existing PTE for the address.
-    ///
-    /// # Panics
-    /// Panics if a level 3 mapping is attempted in a [`RawPageTablePart`].
-    fn alloc_pte(&mut self, vaddr: VirtAddr, size: PageSize) -> Mapping<'_> {
-        let m = self.walk_addr(vaddr);
-        if m.level >= 3 {
-            panic!("PT level >= 3 not possible in PageTablePart");
-        }
-        PageTable::alloc_intermediate_ptes(m, vaddr, size)
-    }
-
-    /// Maps a 4KB page.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address to map.
-    /// - `paddr`: The physical address to map to.
-    /// - `flags`: The flags to apply to the mapping.
-    /// - `shared`: Indicates whether the mapping is shared.
-    ///
-    /// # Returns
-    /// A result indicating success (`Ok`) or failure (`Err`).
-    fn map_4k(
-        &mut self,
-        vaddr: VirtAddr,
-        paddr: PhysAddr,
-        flags: PTEntryFlags,
-        shared: bool,
-    ) -> Result<(), SvsmError> {
-        let mapping = self.alloc_pte(vaddr, PageSize::Regular);
-
-        let addr = if !shared {
-            make_private_address(paddr)
-        } else {
-            make_shared_address(paddr)
-        };
-
-        if mapping.level == 0 {
-            mapping.entry.set(addr, flags);
-            Ok(())
-        } else {
-            Err(SvsmError::Mem)
-        }
-    }
-
-    /// Unmaps a 4KB page.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address of the mapping to unmap.
-    ///
-    /// # Returns
-    /// An optional [`PTEntry`] representing the unmapped page table entry.
-    fn unmap_4k(&mut self, vaddr: VirtAddr) -> Option<PTEntry> {
-        let mapping = self.walk_addr(vaddr);
-
-        match mapping.level {
-            0 => {
-                let e = *mapping.entry;
-                mapping.entry.clear();
-                Some(e)
-            }
-            _ => {
-                assert!(!mapping.entry.present());
-                None
-            }
-        }
-    }
-
-    /// Maps a 2MB page.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address to map.
-    /// - `paddr`: The physical address to map to.
-    /// - `flags`: The flags to apply to the mapping.
-    /// - `shared`: Indicates whether the mapping is shared
-    ///
-    /// # Returns
-    /// A result indicating success (`Ok`) or failure (`Err`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `vaddr` or `paddr` are not 2MB-aligned
-    fn map_2m(
-        &mut self,
-        vaddr: VirtAddr,
-        paddr: PhysAddr,
-        flags: PTEntryFlags,
-        shared: bool,
-    ) -> Result<(), SvsmError> {
-        assert!(vaddr.is_aligned(PAGE_SIZE_2M));
-        assert!(paddr.is_aligned(PAGE_SIZE_2M));
-
-        let mapping = self.alloc_pte(vaddr, PageSize::Huge);
-        let addr = if !shared {
-            make_private_address(paddr)
-        } else {
-            make_shared_address(paddr)
-        };
-
-        if mapping.level == 1 {
-            mapping.entry.set(addr, flags | PTEntryFlags::HUGE);
-            Ok(())
-        } else {
-            Err(SvsmError::Mem)
-        }
-    }
-
-    /// Unmaps a 2MB page.
-    ///
-    /// # Parameters
-    /// - `vaddr`: The virtual address of the mapping to unmap.
-    ///
-    /// # Returns
-    /// An optional [`PTEntry`] representing the unmapped page table entry.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `vaddr` is not memory aligned.
-    fn unmap_2m(&mut self, vaddr: VirtAddr) -> Option<PTEntry> {
-        assert!(vaddr.is_aligned(PAGE_SIZE_2M));
-
-        let mapping = self.walk_addr(vaddr);
-
-        match mapping.level {
-            0 => None,
-            1 => {
-                mapping.entry.clear();
-                Some(*mapping.entry)
-            }
-            _ => {
-                assert!(!mapping.entry.present());
-                None
-            }
-        }
-    }
 }
 
 impl Drop for RawPageTablePart {
@@ -1620,6 +1477,23 @@ impl PageTablePart {
         self.raw.as_deref()
     }
 
+    /// Obtains a guard to manipulate this page table subtree.
+    pub fn as_active(&mut self) -> Result<ActivePageTable<'_, 2>, SvsmError> {
+        let idx = self.idx;
+        let root = self.get_or_init_mut();
+        // SAFETY: PageTableParts always holds a level 2 subtree
+        unsafe { ActivePageTable::from_inactive(&mut root.page, idx) }
+    }
+
+    /// Obtains a guard to manipulate this page table subtree, if it has been
+    /// allocated before, otherwise returning `None`.
+    pub fn try_as_active(&mut self) -> Option<Result<ActivePageTable<'_, 2>, SvsmError>> {
+        let idx = self.idx;
+        let root = self.get_mut()?;
+        // SAFETY: PageTableParts always holds a level 2 subtree
+        unsafe { Some(ActivePageTable::from_inactive(&mut root.page, idx)) }
+    }
+
     /// Request PageTable index to populate this instance to
     ///
     /// # Returns
@@ -1637,104 +1511,6 @@ impl PageTablePart {
     /// Physical base address of the page-table sub-tree
     pub fn address(&self) -> Option<PhysAddr> {
         self.get().map(|p| p.address())
-    }
-
-    /// Map a 4KiB page in the page table sub-tree
-    ///
-    /// # Arguments
-    ///
-    /// * `vaddr` - Virtual address to create the mapping. Must be aligned to 4KiB.
-    /// * `paddr` - Physical address to map. Must be aligned to 4KiB.
-    /// * `flags` - PTEntryFlags used for the mapping
-    /// * `shared` - Defines whether the page is mapped shared or private
-    ///
-    /// # Returns
-    ///
-    /// OK(()) on Success, Err(SvsmError::Mem) on error.
-    ///
-    /// This function can fail when there not enough memory to allocate pages for the mapping.
-    ///
-    /// # Panics
-    ///
-    /// This method panics when either `vaddr` or `paddr` are not aligned to 4KiB.
-    pub fn map_4k(
-        &mut self,
-        vaddr: VirtAddr,
-        paddr: PhysAddr,
-        flags: PTEntryFlags,
-        shared: bool,
-    ) -> Result<(), SvsmError> {
-        assert!(PageTable::index::<3>(vaddr) == self.idx);
-
-        self.get_or_init_mut().map_4k(vaddr, paddr, flags, shared)
-    }
-
-    /// Unmaps a 4KiB page from the page table sub-tree
-    ///
-    /// # Arguments
-    ///
-    /// * `vaddr` - The virtual address to unmap. Must be aligned to 4KiB.
-    ///
-    /// # Returns
-    ///
-    /// Returns a copy of the PTEntry that mapped the virtual address, if any.
-    ///
-    /// # Panics
-    ///
-    /// This method panics when `vaddr` is not aligned to 4KiB.
-    pub fn unmap_4k(&mut self, vaddr: VirtAddr) -> Option<PTEntry> {
-        assert!(PageTable::index::<3>(vaddr) == self.idx);
-
-        self.get_mut().and_then(|r| r.unmap_4k(vaddr))
-    }
-
-    /// Map a 2MiB page in the page table sub-tree
-    ///
-    /// # Arguments
-    ///
-    /// * `vaddr` - Virtual address to create the mapping. Must be aligned to 2MiB.
-    /// * `paddr` - Physical address to map. Must be aligned to 2MiB.
-    /// * `flags` - PTEntryFlags used for the mapping
-    /// * `shared` - Defines whether the page is mapped shared or private
-    ///
-    /// # Returns
-    ///
-    /// OK(()) on Success, Err(SvsmError::Mem) on error.
-    ///
-    /// This function can fail when there not enough memory to allocate pages for the mapping.
-    ///
-    /// # Panics
-    ///
-    /// This method panics when either `vaddr` or `paddr` are not aligned to 2MiB.
-    pub fn map_2m(
-        &mut self,
-        vaddr: VirtAddr,
-        paddr: PhysAddr,
-        flags: PTEntryFlags,
-        shared: bool,
-    ) -> Result<(), SvsmError> {
-        assert!(PageTable::index::<3>(vaddr) == self.idx);
-
-        self.get_or_init_mut().map_2m(vaddr, paddr, flags, shared)
-    }
-
-    /// Unmaps a 2MiB page from the page table sub-tree
-    ///
-    /// # Arguments
-    ///
-    /// * `vaddr` - The virtual address to unmap. Must be aligned to 2MiB.
-    ///
-    /// # Returns
-    ///
-    /// Returns a copy of the PTEntry that mapped the virtual address, if any.
-    ///
-    /// # Panics
-    ///
-    /// This method panics when `vaddr` is not aligned to 2MiB.
-    pub fn unmap_2m(&mut self, vaddr: VirtAddr) -> Option<PTEntry> {
-        assert!(PageTable::index::<3>(vaddr) == self.idx);
-
-        self.get_mut().and_then(|r| r.unmap_2m(vaddr))
     }
 }
 
