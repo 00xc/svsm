@@ -17,7 +17,7 @@ use crate::address::{Address, PhysAddr, VirtAddr};
 use crate::cpu::IrqState;
 use crate::cpu::LocalApic;
 use crate::cpu::ShadowStackInit;
-use crate::cpu::control_regs::{read_cr0, read_cr4};
+use crate::cpu::control_regs::{read_cr0, read_cr3, read_cr4};
 use crate::cpu::efer::read_efer;
 use crate::cpu::idt::common::INT_INJ_VECTOR;
 use crate::cpu::tss::TSS_LIMIT;
@@ -772,6 +772,11 @@ impl PerCpu {
     }
 
     pub fn get_pgtable(&self) -> ActivePageTable<'_> {
+        debug_assert_eq!(
+            read_cr3().bits(),
+            self.cr3.load(Ordering::Relaxed),
+            "PerCpu page table not loaded in CR3"
+        );
         // SAFETY: by definition, this is the active page table.
         unsafe { self.get_raw_pgtable().as_active() }
     }
@@ -1225,8 +1230,8 @@ impl PerCpu {
     }
 
     pub fn handle_pf(&self, vaddr: VirtAddr, write: bool) -> Result<(), SvsmError> {
-        let mut pgtable = self.get_pgtable();
-        self.vm_range.handle_page_fault(&mut pgtable, vaddr, write)
+        let pgtable = self.get_raw_pgtable();
+        self.vm_range.handle_page_fault(pgtable, vaddr, write)
     }
 
     pub fn schedule_init(&self) -> TaskPointer {
