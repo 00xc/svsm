@@ -14,10 +14,12 @@ use crate::cpu::{flush_tlb_global_percpu, flush_tlb_global_sync};
 use crate::error::SvsmError;
 use crate::mm::{
     PGTABLE_LVL3_IDX_PTE_SELFMAP, PGTABLE_LVL3_IDX_SHARED, PGTABLE_LVL3_IDX_TEMP_SELFMAP, PageBox,
-    SVSM_PTE_BASE, phys_to_virt, virt_from_idx, virt_to_phys,
+    SVSM_PTE_BASE, free_page_phys, virt_from_idx, virt_to_phys,
 };
 use crate::platform::SvsmPlatform;
-use crate::types::{PAGE_SIZE, PAGE_SIZE_1G, PAGE_SIZE_2M, PageSize};
+use crate::types::{
+    PAGE_SHIFT, PAGE_SHIFT_1G, PAGE_SHIFT_2M, PAGE_SIZE, PAGE_SIZE_1G, PAGE_SIZE_2M, PageSize,
+};
 use crate::utils::MemoryRegion;
 use crate::utils::immut_after_init::{ImmutAfterInitCell, ImmutAfterInitResult};
 use bitflags::bitflags;
@@ -434,33 +436,6 @@ impl PTPage {
         let page = Self::alloc_box()?;
         let paddr = virt_to_phys(page.vaddr());
         Ok((PageBox::leak(page), paddr))
-    }
-
-    /// Frees a pagetable page.
-    ///
-    /// # Safety
-    ///
-    /// The given reference must correspond to a valid previously allocated
-    /// page table page.
-    unsafe fn free(page: &'static Self) {
-        // SAFETY: The page put into the PageBox is a previously allocated
-        // page table page.
-        unsafe {
-            let _ = PageBox::from_raw(NonNull::from(page));
-        }
-    }
-
-    /// Converts a pagetable entry to a mutable reference to a [`PTPage`],
-    /// if the entry is present and not huge.
-    fn from_entry(entry: PTEntry) -> Option<&'static mut Self> {
-        if !entry.present() || entry.huge() {
-            return None;
-        }
-
-        let address = phys_to_virt(entry.address());
-        // SAFETY: Every PTEntry points to a previously allocated page-table
-        // page, so this pointer dereference is safe.
-        Some(unsafe { Self::from_vaddr(address) })
     }
 
     /// Generates a `PTPage` from a virtual address.
@@ -1111,6 +1086,37 @@ impl<const L: usize> Drop for ActivePageTable<'_, L> {
     }
 }
 
+impl ActivePageTable<'_, 2> {
+    /// Frees all level 0 pages under the given level 1 page table.
+    fn free_lvl1(page: &PTPage) {
+        for entry in page.entries.iter() {
+            if entry.present() && !entry.huge() {
+                free_page_phys(entry.address());
+            }
+        }
+    }
+
+    /// Frees all Level 1 and Level 0 page table pages in this Level 2 subtree.
+    pub fn free_lvl2(&mut self, idx: usize) {
+        // In the self-map, a Level 1 page at PML4[idx].PDPT[i] appears at
+        // virtual address [S, S, idx, i, 0] where S = selfmap_idx.
+        let base = virt_from_idx(self.selfmap_idx)
+            + (self.selfmap_idx << PAGE_SHIFT_1G)
+            + (idx << PAGE_SHIFT_2M);
+
+        for (i, entry) in self.pt.entries.iter().enumerate() {
+            if entry.present() && !entry.huge() {
+                let l1_vaddr = base + (i << PAGE_SHIFT);
+                // SAFETY: Level 1 page is accessible via self-map at computed address
+                let l1_page = unsafe { &*l1_vaddr.as_ptr::<PTPage>() };
+
+                Self::free_lvl1(l1_page);
+                free_page_phys(entry.address());
+            }
+        }
+    }
+}
+
 /// Page table structure containing a root page with multiple entries.
 #[repr(C)]
 #[derive(Debug, FromZeros)]
@@ -1378,36 +1384,6 @@ struct RawPageTablePart {
 }
 
 impl RawPageTablePart {
-    /// Frees a level 1 page table.
-    fn free_lvl1(page: &PTPage) {
-        for entry in page.entries.iter() {
-            if let Some(page) = PTPage::from_entry(*entry) {
-                // SAFETY: the page comes from an entry in the page table,
-                // which we allocated using `PTPage::alloc()`, so this is
-                // safe.
-                unsafe { PTPage::free(page) };
-            }
-        }
-    }
-
-    /// Frees a level 2 page table, including all level 1 tables beneath it.
-    fn free_lvl2(page: &PTPage) {
-        for entry in page.entries.iter() {
-            if let Some(l1_page) = PTPage::from_entry(*entry) {
-                Self::free_lvl1(l1_page);
-                // SAFETY: the page comes from an entry in the page table,
-                // which we allocated using `PTPage::alloc()`, so this is
-                // safe.
-                unsafe { PTPage::free(l1_page) };
-            }
-        }
-    }
-
-    /// Frees the resources associated with this page table part.
-    fn free(&self) {
-        RawPageTablePart::free_lvl2(&self.page);
-    }
-
     /// Returns the physical address of this page table part.
     fn address(&self) -> PhysAddr {
         virt_to_phys(VirtAddr::from(self as *const RawPageTablePart))
@@ -1426,9 +1402,16 @@ impl RawPageTablePart {
     }
 }
 
-impl Drop for RawPageTablePart {
+impl Drop for PageTablePart {
     fn drop(&mut self) {
-        self.free();
+        let idx = self.idx;
+        if let Some(Ok(mut subtree)) = self.try_as_active() {
+            subtree.free_lvl2(idx);
+        } else {
+            log::error!(
+                "PageTablePart::drop(): could not map subtree into selfmap, leaking memory"
+            );
+        }
     }
 }
 
