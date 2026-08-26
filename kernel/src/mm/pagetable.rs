@@ -560,9 +560,9 @@ impl<'a> ActivePageTable<'a, 2> {
     /// and that a page table with a selfmap at `PGTABLE_LVL3_IDX_PTE_SELFMAP`
     /// is active.
     unsafe fn from_inactive(root: &'a mut PTPage, idx: usize) -> Result<Self, SvsmError> {
-        this_cpu().inc_temp_selfmap_nesting().inspect_err(|_| {
-            log::error!("Attempted nested use of temporary self-map");
-        })?;
+        // this_cpu().inc_temp_selfmap_nesting().inspect_err(|_| {
+        //     log::error!("Attempted nested use of temporary self-map");
+        // })?;
 
         // Get access to the active PML4 via the real self-map
         let active_pml4_vaddr = virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP)
@@ -1082,7 +1082,7 @@ impl<const L: usize> Drop for ActivePageTable<'_, L> {
             }
         }
 
-        this_cpu().dec_temp_selfmap_nesting();
+        // this_cpu().dec_temp_selfmap_nesting();
     }
 }
 
