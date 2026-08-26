@@ -1141,9 +1141,11 @@ impl PageTable {
     /// The caller must ensure to take other actions to make sure a memory safe
     /// execution state is warranted (e.g. changing the stack and register state)
     pub unsafe fn load(&self) {
+        let cr3 = self.cr3_value();
+        log::info!("PageTable::load: cr3={:#018x} (from vaddr={:p})", cr3, self);
         // SAFETY: demanded to the caller
         unsafe {
-            write_cr3(self.cr3_value());
+            write_cr3(cr3);
         }
     }
 

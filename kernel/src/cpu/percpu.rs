@@ -697,6 +697,7 @@ impl PerCpu {
             .unwrap();
         // Capture the physical address as well for use in task switch.
         let paddr = virt_to_phys(vaddr);
+        log::info!("set_pgtable: vaddr={:#018x} paddr={:#018x}", vaddr, paddr);
         self.cr3.store(paddr.into(), Ordering::Relaxed);
     }
 
