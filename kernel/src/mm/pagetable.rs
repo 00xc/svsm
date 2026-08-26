@@ -560,32 +560,45 @@ impl<'a> ActivePageTable<'a, 2> {
     /// and that a page table with a selfmap at `PGTABLE_LVL3_IDX_PTE_SELFMAP`
     /// is active.
     unsafe fn from_inactive(root: &'a mut PTPage, idx: usize) -> Result<Self, SvsmError> {
+        log::info!("from_inactive: entry, idx={}", idx);
         // this_cpu().inc_temp_selfmap_nesting().inspect_err(|_| {
         //     log::error!("Attempted nested use of temporary self-map");
         // })?;
 
+        log::info!("from_inactive: calculating active_pml4_vaddr");
         // Get access to the active PML4 via the real self-map
         let active_pml4_vaddr = virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP)
             + ((virt_from_idx(PGTABLE_LVL3_IDX_PTE_SELFMAP).as_usize() & 0x0000_FFFF_FFFF_F000)
                 >> 9);
+        log::info!("from_inactive: active_pml4_vaddr={:#x}", active_pml4_vaddr);
+
         // SAFETY: the caller ensures that the selfmap is installed in the current page table.
         let active_pml4 = unsafe { &mut *(active_pml4_vaddr.as_mut_ptr::<PTPage>()) };
+        log::info!("from_inactive: got active_pml4");
 
         // Find the physical address of the page table root
+        log::info!("from_inactive: calling virt_to_phys on root={:p}", root);
         let root_phys = virt_to_phys(VirtAddr::from(core::ptr::from_mut(root)));
+        log::info!("from_inactive: root_phys={:#x}", root_phys);
 
         // Allocate intermediate PML4, make it point to the inactive
         // PDPT, and to itself to set up the recursive self-map
+        log::info!("from_inactive: allocating temp PML4");
         let (temp_pml4, pml4_phys) = PTPage::alloc()?;
+        log::info!("from_inactive: temp pml4_phys={:#x}", pml4_phys);
+
         temp_pml4[idx].set(make_private_address(root_phys), PTEntryFlags::task_data());
         temp_pml4[PGTABLE_LVL3_IDX_TEMP_SELFMAP]
             .set(make_private_address(pml4_phys), PTEntryFlags::task_data());
         let temp_pml4_ptr = Some(NonNull::from(temp_pml4));
 
         // Install temporary self-map in active page table
+        log::info!("from_inactive: installing temp self-map at index {}", PGTABLE_LVL3_IDX_TEMP_SELFMAP);
         active_pml4[PGTABLE_LVL3_IDX_TEMP_SELFMAP]
             .set(make_private_address(pml4_phys), PTEntryFlags::task_data());
+        log::info!("from_inactive: flushing TLB");
         flush_tlb_global_sync();
+        log::info!("from_inactive: TLB flushed, returning");
 
         Ok(Self {
             pt: root,
@@ -1414,8 +1427,10 @@ impl PageTablePart {
 
     /// Obtains a guard to manipulate this page table subtree.
     pub fn as_active(&mut self) -> Result<ActivePageTable<'_, 2>, SvsmError> {
+        log::info!("PageTablePart::as_active: idx={}", self.idx);
         let idx = self.idx;
         let root = self.get_or_init_mut();
+        log::info!("PageTablePart::as_active: calling from_inactive");
         // SAFETY: PageTableParts always holds a level 2 subtree
         unsafe { ActivePageTable::from_inactive(&mut root.page, idx) }
     }
@@ -1423,8 +1438,10 @@ impl PageTablePart {
     /// Obtains a guard to manipulate this page table subtree, if it has been
     /// allocated before, otherwise returning `None`.
     pub fn try_as_active(&mut self) -> Option<Result<ActivePageTable<'_, 2>, SvsmError>> {
+        log::info!("PageTablePart::try_as_active: idx={}", self.idx);
         let idx = self.idx;
         let root = self.get_mut()?;
+        log::info!("PageTablePart::try_as_active: calling from_inactive");
         // SAFETY: PageTableParts always holds a level 2 subtree
         unsafe { Some(ActivePageTable::from_inactive(&mut root.page, idx)) }
     }

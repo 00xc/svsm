@@ -843,8 +843,11 @@ impl PerCpu {
     }
 
     fn finish_page_table(&self) {
+        log::info!("PerCpu::finish_page_table: entry");
         let pgtable = self.get_raw_pgtable();
+        log::info!("PerCpu::finish_page_table: calling populate");
         self.vm_range.populate(pgtable);
+        log::info!("PerCpu::finish_page_table: populate returned");
     }
 
     pub fn dump_vm_ranges(&self) {
