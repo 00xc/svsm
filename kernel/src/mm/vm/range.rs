@@ -11,10 +11,12 @@ use crate::locking::RWLock;
 use crate::mm::pagetable::{PTEntryFlags, PageTable, PageTablePart};
 use crate::mm::{AddrSpaceDescriptor, virt_from_idx};
 use crate::types::{PAGE_SHIFT, PAGE_SIZE, PageSize};
+use crate::utils::unique_va_allocator::UniqueVaAllocator;
 use crate::utils::{MemoryRegion, align_down, align_up};
 
 use core::borrow::Borrow;
 use core::cmp::max;
+use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::ops::Deref;
 
@@ -89,6 +91,67 @@ pub trait VmAllocator<V: VmRange>: core::fmt::Debug {
     fn for_each<F>(&self, f: F)
     where
         F: FnMut(VirtAddr, &Mapping);
+}
+
+/// A per-instance [`VmAllocator`] backed by a [`UniqueVaAllocator`].
+///
+/// The reservation authority and the [`Mapping`] store are the same
+/// structure, so every mapped address is tracked in exactly one place.
+#[derive(Debug)]
+pub struct PrivateVmAllocator<V: VmRange> {
+    allocations: RWLock<UniqueVaAllocator<Mapping>>,
+    _phantom: PhantomData<V>,
+}
+
+impl<V: VmRange> VmAllocator<V> for PrivateVmAllocator<V> {
+    fn new() -> Self {
+        Self {
+            allocations: RWLock::new(UniqueVaAllocator::new(
+                V::DESCRIPTOR.base().as_usize(),
+                V::DESCRIPTOR.end().as_usize(),
+            )),
+            _phantom: PhantomData,
+        }
+    }
+
+    fn alloc(
+        &self,
+        hint: VirtAddr,
+        size: usize,
+        align: usize,
+        mapping: Mapping,
+    ) -> Result<VirtAddr, SvsmError> {
+        self.allocations
+            .lock_write()
+            .alloc_aligned_hint(hint.as_usize(), size, align, mapping)
+            .map(VirtAddr::from)
+            .ok_or(SvsmError::Mem)
+    }
+
+    fn alloc_at(&self, at: VirtAddr, size: usize, mapping: Mapping) -> Result<VirtAddr, SvsmError> {
+        self.allocations
+            .lock_write()
+            .alloc_at(at.as_usize(), size, mapping)
+            .map(VirtAddr::from)
+            .ok_or(SvsmError::Mem)
+    }
+
+    fn free(&self, base: VirtAddr) -> Option<Mapping> {
+        self.allocations.lock_write().remove(base.as_usize())
+    }
+
+    fn query(&self, addr: VirtAddr) -> Option<(VirtAddr, Mapping)> {
+        self.allocations
+            .lock_read()
+            .get_containing(addr.as_usize())
+            .map(|(base, mapping)| (VirtAddr::from(base), mapping.clone()))
+    }
+
+    fn for_each<F: FnMut(VirtAddr, &Mapping)>(&self, mut f: F) {
+        for (start, _, m) in self.allocations.lock_read().iter() {
+            f(VirtAddr::from(start), m);
+        }
+    }
 }
 
 /// Virtual Memory Region
