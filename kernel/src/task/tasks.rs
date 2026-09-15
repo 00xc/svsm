@@ -37,8 +37,8 @@ use crate::fs::{Directory, FileHandle, opendir, stdout_open};
 use crate::locking::RWLock;
 use crate::locking::SpinLock;
 use crate::locking::SpinLockIrqSafe;
-use crate::mm::pagetable::{PTEntryFlags, PageTable};
-use crate::mm::vm::{Mapping, VMFileMappingFlags, VMKernelStack, VMR, VMRMapping};
+use crate::mm::pagetable::PageTable;
+use crate::mm::vm::{Mapping, VMFileMappingFlags, VMKernelStack, VmRange, Vmr, VmrMapping};
 use crate::mm::{
     PageBox, SVSM_PERTASK, USER_MEM, mappings::create_anon_mapping, mappings::create_file_mapping,
 };
@@ -50,7 +50,7 @@ use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter}
 use super::exec::exec;
 use super::schedule::complete_task_switch;
 use super::schedule::terminate;
-use super::task_mm::TaskMM;
+use super::task_mm::{TaskMM, TaskVm, UserVm};
 use super::{UserExecInfo, WaitQueue};
 
 pub const INITIAL_TASK_ID: u32 = 1;
@@ -353,10 +353,10 @@ pub struct Task {
     pub page_table: SpinLock<PageBox<PageTable>>,
 
     /// Task kernel stack mapping
-    _kernel_stack: VMRMapping<Arc<TaskMM>>,
+    _kernel_stack: VmrMapping<TaskVm, Arc<TaskMM>>,
 
     /// Task shadow stack mapping
-    _shadow_stack: Option<VMRMapping<Arc<TaskMM>>>,
+    _shadow_stack: Option<VmrMapping<TaskVm, Arc<TaskMM>>>,
 
     /// Task memory management state
     mm: Arc<TaskMM>,
@@ -449,9 +449,9 @@ struct CreateTaskArguments {
     // The name of the task.
     name: Arc<str>,
 
-    // For a user task, supplies the `VMR` that will represent the user-mode
-    // address space.
-    vm_user_range: Option<VMR>,
+    // For a user task, supplies the `Vmr<UserVm>` that will represent the
+    // user-mode address space.
+    vm_user_range: Option<Vmr<UserVm>>,
 
     // The root directory that will be associated with this task.
     rootdir: Arc<dyn Directory>,
@@ -499,7 +499,7 @@ impl Task {
             let base_token_addr;
 
             // Map shadow stack into virtual address range
-            let mapping = VMRMapping::new(task_mm.clone(), Arc::new(shadow_stack))?;
+            let mapping = VmrMapping::new(task_mm.clone(), Arc::new(shadow_stack))?;
             let stack_base = mapping.virt_addr();
 
             // Initialize shadow stack
@@ -533,7 +533,7 @@ impl Task {
                 info.start_parameter,
             )?,
         };
-        let kernel_stack_mapping = VMRMapping::new(task_mm.clone(), stack)?;
+        let kernel_stack_mapping = VmrMapping::new(task_mm.clone(), stack)?;
         let stack_start = kernel_stack_mapping.virt_addr();
 
         task_mm.kernel_range().populate(&mut pgtable);
@@ -596,7 +596,7 @@ impl Task {
         root: Arc<dyn Directory>,
         name: Arc<str>,
     ) -> Result<TaskPointer, SvsmError> {
-        let vm_user_range = VMR::new(USER_MEM, PTEntryFlags::USER)?;
+        let vm_user_range = Vmr::<UserVm>::new();
         // SAFETY: the user address range is fully aligned to top-level paging
         // boundaries.
         unsafe {
@@ -867,14 +867,14 @@ impl Task {
         Some(guard)
     }
 
-    pub fn mmap_common<'a>(
-        vmr: &'a VMR,
+    fn mmap_range<'a, V: VmRange>(
+        vmr: &'a Vmr<V>,
         addr: VirtAddr,
         file: Option<&FileHandle>,
         offset: usize,
         size: usize,
         flags: VMFileMappingFlags,
-    ) -> Result<VMRMapping<&'a VMR>, SvsmError> {
+    ) -> Result<VmrMapping<V, &'a Vmr<V>>, SvsmError> {
         let mapping = if let Some(f) = file {
             create_file_mapping(f, offset, size, flags)?
         } else {
@@ -882,9 +882,9 @@ impl Task {
         };
 
         if flags.contains(VMFileMappingFlags::Fixed) {
-            VMRMapping::new_at(vmr, addr, mapping)
+            VmrMapping::new_at(vmr, addr, mapping)
         } else {
-            VMRMapping::new_hint(vmr, addr, mapping)
+            VmrMapping::new_hint(vmr, addr, mapping)
         }
     }
 
@@ -896,7 +896,7 @@ impl Task {
         size: usize,
         flags: VMFileMappingFlags,
     ) -> Result<VirtAddr, SvsmError> {
-        let guard = Self::mmap_common(self.mm.kernel_range(), addr, file, offset, size, flags)?;
+        let guard = Self::mmap_range(self.mm.kernel_range(), addr, file, offset, size, flags)?;
         Ok(guard.leak())
     }
 
@@ -907,8 +907,8 @@ impl Task {
         offset: usize,
         size: usize,
         flags: VMFileMappingFlags,
-    ) -> Result<VMRMapping<&'a VMR>, SvsmError> {
-        Self::mmap_common(self.mm.kernel_range(), addr, file, offset, size, flags)
+    ) -> Result<VmrMapping<TaskVm, &'a Vmr<TaskVm>>, SvsmError> {
+        Self::mmap_range(self.mm.kernel_range(), addr, file, offset, size, flags)
     }
 
     pub fn mmap_user(
@@ -920,7 +920,7 @@ impl Task {
         flags: VMFileMappingFlags,
     ) -> Result<VirtAddr, SvsmError> {
         let vmr = self.mm.user_range().ok_or(SvsmError::Mem)?;
-        let guard = Self::mmap_common(vmr, addr, file, offset, size, flags)?;
+        let guard = Self::mmap_range(vmr, addr, file, offset, size, flags)?;
         Ok(guard.leak())
     }
 
