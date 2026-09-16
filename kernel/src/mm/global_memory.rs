@@ -116,21 +116,17 @@ impl GlobalRangeGuard {
 
     fn map(&self, paddr: PhysAddr, flags: PTEntryFlags) -> Result<(), SvsmError> {
         if self.huge {
-            this_cpu()
-                .get_pgtable()
-                .map_region_2m(self.region(), paddr, flags, self.shared)
+            this_cpu().with_pgtable(|pg| pg.map_region_2m(self.region(), paddr, flags, self.shared))
         } else {
-            this_cpu()
-                .get_pgtable()
-                .map_region_4k(self.region(), paddr, flags, self.shared)
+            this_cpu().with_pgtable(|pg| pg.map_region_4k(self.region(), paddr, flags, self.shared))
         }
     }
 
     fn unmap(&self) {
         if self.huge {
-            this_cpu().get_pgtable().unmap_region_2m(self.region());
+            this_cpu().with_pgtable(|pg| pg.unmap_region_2m(self.region()));
         } else {
-            this_cpu().get_pgtable().unmap_region_4k(self.region());
+            this_cpu().with_pgtable(|pg| pg.unmap_region_4k(self.region()));
         }
     }
 

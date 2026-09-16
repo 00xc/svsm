@@ -66,14 +66,12 @@ impl PerCPUPageMappingGuard {
         let mapping = if huge {
             let range = VRangeAlloc::new_2m(size, 0)?;
             this_cpu()
-                .get_pgtable()
-                .map_region_2m(range.region(), paddr_start, flags, false)?;
+                .with_pgtable(|pg| pg.map_region_2m(range.region(), paddr_start, flags, false))?;
             range
         } else {
             let range = VRangeAlloc::new_4k(size, 0)?;
             this_cpu()
-                .get_pgtable()
-                .map_region_4k(range.region(), paddr_start, flags, false)?;
+                .with_pgtable(|pg| pg.map_region_4k(range.region(), paddr_start, flags, false))?;
             range
         };
 
@@ -112,10 +110,10 @@ impl Drop for PerCPUPageMappingGuard {
     fn drop(&mut self) {
         let region = self.mapping.region();
         let size = if self.mapping.huge() {
-            this_cpu().get_pgtable().unmap_region_2m(region);
+            this_cpu().with_pgtable(|pg| pg.unmap_region_2m(region));
             PageSize::Huge
         } else {
-            this_cpu().get_pgtable().unmap_region_4k(region);
+            this_cpu().with_pgtable(|pg| pg.unmap_region_4k(region));
             PageSize::Regular
         };
 

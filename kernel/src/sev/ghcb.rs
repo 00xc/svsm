@@ -158,7 +158,7 @@ impl GhcbPage {
         }
 
         // Map page unencrypted
-        this_cpu().get_pgtable().set_shared_4k(vaddr)?;
+        this_cpu().with_pgtable(|pg| pg.set_shared_4k(vaddr))?;
         flush_tlb_global_sync_page(vaddr, PageSize::Regular);
 
         // SAFETY: all zeros is a valid representation for the GHCB.
@@ -173,8 +173,7 @@ impl Drop for GhcbPage {
 
         // Re-encrypt page
         this_cpu()
-            .get_pgtable()
-            .set_encrypted_4k(vaddr)
+            .with_pgtable(|pg| pg.set_encrypted_4k(vaddr))
             .expect("Could not re-encrypt page");
         flush_tlb_global_sync_page(vaddr, PageSize::Regular);
 

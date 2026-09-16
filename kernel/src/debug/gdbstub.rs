@@ -396,7 +396,7 @@ pub mod svsm_gdbstub {
             // can get the physical address for this VA then create a temporary
             // mapping
 
-            let Ok(phys) = this_cpu().get_pgtable().phys_addr(addr) else {
+            let Ok(phys) = this_cpu().with_pgtable(|pg| pg.phys_addr(addr)) else {
                 // The virtual address is not one that SVSM has mapped.
                 // Try safely writing it to the original virtual address
                 // SAFETY: it is up to the user to ensure that the address we

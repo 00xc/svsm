@@ -462,7 +462,7 @@ struct CreateTaskArguments {
 
 impl Task {
     fn create_common(cpu: &PerCpu, args: CreateTaskArguments) -> Result<TaskPointer, SvsmError> {
-        let mut pgtable = cpu.get_pgtable().clone_shared()?;
+        let mut pgtable = cpu.with_pgtable(|pg| pg.clone_shared())?;
 
         cpu.populate_page_table(&mut pgtable);
 
